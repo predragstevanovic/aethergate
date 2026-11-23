@@ -1,0 +1,38 @@
+# Render Blueprint: one-click deploy of the Spring Boot gateway (Docker, free plan, Frankfurt).
+# Secrets marked sync:false are entered in the Render dashboard, never committed.
+services:
+  - type: web
+    name: aethergate-api
+    runtime: docker
+    plan: free
+    region: frankfurt
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /actuator/health/readiness
+    envVars:
+      - key: SPRING_PROFILES_ACTIVE
+        value: prod
+      - key: DB_POOL_MAX
+        value: "5"
+      - key: JDBC_URL
+        sync: false
+      - key: DB_USER
+        sync: false
+      - key: DB_PASSWORD
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: DEMO_USER_EMAIL
+        value: demo@aethergate.dev
+      - key: DEMO_USER_PASSWORD
+        sync: false
+      - key: FRONTEND_ORIGIN
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false

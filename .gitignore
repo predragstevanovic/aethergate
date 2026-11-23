@@ -1,0 +1,17 @@
+# secrets — never commit (only the empty template is tracked)
+.env*
+!.env.example
+deploy/.env
+
+# build output
+backend/target/
+frontend/node_modules/
+frontend/dist/
+.vercel/
+
+# IDE / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db

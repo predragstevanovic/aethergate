@@ -1,0 +1,21 @@
+aethergate:
+  supabase:
+    url: http://localhost:1
+    anon-key: ""
+    service-role-key: ""
+  demo:
+    password: ""
+  cache:
+    async-store: false
+  rate-limit:
+    sync-interval: 1h
+  mock:
+    ttft-min-ms: 0
+    ttft-max-ms: 1
+    token-min-ms: 0
+    token-max-ms: 0
+
+logging:
+  level:
+    root: WARN
+    com.aethergate: WARN

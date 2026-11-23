@@ -1,0 +1,98 @@
+server:
+  port: ${PORT:8080}
+  shutdown: graceful
+  forward-headers-strategy: framework
+
+spring:
+  application:
+    name: aethergate
+  profiles:
+    # no profile given (e.g. IntelliJ's green "run main" arrow) -> "local", which loads ../.env.local
+    # tests activate "test", the Docker image activates "prod", so neither ever reads .env.local
+    default: local
+  threads:
+    virtual:
+      enabled: true
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+    serialization:
+      write-dates-as-timestamps: false
+  mvc:
+    problemdetails:
+      enabled: true
+    async:
+      request-timeout: 120s
+  datasource:
+    url: ${JDBC_URL:jdbc:postgresql://localhost:5432/postgres}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:postgres}
+    hikari:
+      maximum-pool-size: ${DB_POOL_MAX:8}
+      minimum-idle: 1
+      connection-timeout: 10000
+      max-lifetime: 600000
+      connection-test-query: SELECT 1
+      # Unqualified names resolve to our schema; pgvector types/operators live in "extensions".
+      connection-init-sql: SET search_path TO aethergate, extensions, public
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: none
+    properties:
+      hibernate:
+        default_schema: aethergate
+        jdbc:
+          time_zone: UTC
+  flyway:
+    schemas: aethergate
+    default-schema: aethergate
+    create-schemas: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+aethergate:
+  # Set to "seed" or "audit" to run a maintenance tool instead of the web server.
+  tool: ${AETHERGATE_TOOL:}
+  cors:
+    allowed-origins: ${FRONTEND_ORIGIN:http://localhost:5173},http://localhost:5173
+  supabase:
+    url: ${SUPABASE_URL:http://localhost:54321}
+    anon-key: ${SUPABASE_ANON_KEY:}
+    service-role-key: ${SUPABASE_SERVICE_ROLE_KEY:}
+  demo:
+    email: ${DEMO_USER_EMAIL:demo@aethergate.dev}
+    password: ${DEMO_USER_PASSWORD:}
+    tenant-slug: vortex-ai-labs
+  metering:
+    default-max-tokens: 512
+    max-top-up-usd: 1000
+  cache:
+    similarity-threshold: 0.96
+    ttl: 24h
+  rate-limit:
+    playground-rpm: 30
+    playground-tpm: 60000
+    sync-interval: 5s
+  providers:
+    openai:
+      api-key: ${OPENAI_API_KEY:}
+      base-url: https://api.openai.com/v1
+    anthropic:
+      api-key: ${ANTHROPIC_API_KEY:}
+      base-url: https://api.anthropic.com/v1
+    gemini:
+      api-key: ${GEMINI_API_KEY:}
+      base-url: https://generativelanguage.googleapis.com/v1beta/openai
+  mock:
+    ttft-min-ms: 80
+    ttft-max-ms: 180
+    token-min-ms: 12
+    token-max-ms: 28

@@ -1,0 +1,23 @@
+{$API_DOMAIN} {
+	# compress JSON/text only; token streams (text/event-stream) are never compressed or buffered
+	encode zstd gzip {
+		match {
+			header Content-Type application/json* application/problem+json* text/plain* text/html*
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# CORS is enforced by Spring Security (allow-list from FRONTEND_ORIGIN); Caddy only proxies.
+	reverse_proxy gateway:8080 {
+		flush_interval -1
+		header_up X-Forwarded-Proto {scheme}
+		health_uri /actuator/health/liveness
+		health_interval 15s
+	}
+}

@@ -1,0 +1,39 @@
+# AetherGate backend on a single VM (e.g. Oracle Cloud Always Free, 1 OCPU / 6 GB ARM):
+#   cp ../.env.example .env   # fill in values
+#   API_DOMAIN=api.example.com docker compose up -d --build
+# Caddy obtains and renews the TLS certificate automatically.
+services:
+  gateway:
+    build: ../backend
+    image: aethergate-backend:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SERVER_PORT: 8080
+    expose:
+      - "8080"
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - gateway
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      API_DOMAIN: ${API_DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

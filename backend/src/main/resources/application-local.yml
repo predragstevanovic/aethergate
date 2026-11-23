@@ -1,0 +1,11 @@
+# Local development profile (IntelliJ run configuration "AetherGate API (local)").
+# Loads secrets from the gitignored .env.local in the repo root; no values live in this file.
+spring:
+  config:
+    import:
+      - optional:file:./.env.local[.properties]
+      - optional:file:../.env.local[.properties]
+      - optional:file:./aethergate/.env.local[.properties]   # working dir = IntelliJ project root
+
+server:
+  port: ${PORT:8088}   # the Vite console's VITE_API_BASE_URL points at :8088

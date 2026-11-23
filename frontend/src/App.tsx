@@ -1,0 +1,71 @@
+import { lazy, Suspense } from 'react'
+import { createBrowserRouter, Navigate, Outlet, RouterProvider } from 'react-router'
+import { AppShell } from './components/layout/AppShell'
+import { ErrorBoundary } from './components/layout/ErrorBoundary'
+import { Logo } from './components/layout/Logo'
+import { AuthProvider, useAuth } from './context/AuthContext'
+import { LoginPage } from './pages/LoginPage'
+
+// Console pages load on demand: the login screen never pulls in the charting library.
+const OverviewPage = lazy(() => import('./pages/OverviewPage').then((m) => ({ default: m.OverviewPage })))
+const PlaygroundChaosPage = lazy(() => import('./pages/PlaygroundChaosPage').then((m) => ({ default: m.PlaygroundChaosPage })))
+const LedgerAuditPage = lazy(() => import('./pages/LedgerAuditPage').then((m) => ({ default: m.LedgerAuditPage })))
+const ApiKeysRoutingPage = lazy(() => import('./pages/ApiKeysRoutingPage').then((m) => ({ default: m.ApiKeysRoutingPage })))
+
+function PageFallback() {
+  return <div className="space-y-4" aria-hidden><div className="skeleton h-8 w-48" /><div className="skeleton h-28" /><div className="skeleton h-64" /></div>
+}
+
+const page = (el: React.ReactNode) => <Suspense fallback={<PageFallback />}>{el}</Suspense>
+
+function Splash() {
+  return (
+    <div className="h-full flex items-center justify-center" role="status" aria-label="Loading">
+      <Logo className="size-8 animate-pulse" />
+    </div>
+  )
+}
+
+/** Signed in + workspace resolved, or back to /login. */
+function RequireAuth() {
+  const { ready, session, me } = useAuth()
+  if (!ready) return <Splash />
+  if (!session || !me) return <Navigate to="/login" replace />
+  return <Outlet />
+}
+
+function PublicOnly() {
+  const { ready, session, me } = useAuth()
+  if (!ready) return <Splash />
+  if (session && me) return <Navigate to="/" replace />
+  return <Outlet />
+}
+
+const router = createBrowserRouter([
+  { element: <PublicOnly />, children: [{ path: '/login', element: <LoginPage /> }] },
+  {
+    element: <RequireAuth />,
+    children: [
+      {
+        element: <AppShell />,
+        children: [
+          { path: '/', element: page(<OverviewPage />) },
+          { path: '/playground', element: page(<PlaygroundChaosPage />) },
+          { path: '/ledger', element: page(<LedgerAuditPage />) },
+          { path: '/settings', element: page(<ApiKeysRoutingPage />) },
+        ],
+      },
+    ],
+  },
+  { path: '*', element: <Navigate to="/" replace /> },
+])
+
+export default function App() {
+  return (
+    <ErrorBoundary label="AetherGate">
+      <AuthProvider>
+        <RouterProvider router={router} />
+      </AuthProvider>
+    </ErrorBoundary>
+  )
+}

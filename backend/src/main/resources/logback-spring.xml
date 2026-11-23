@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+
+    <!-- Production: one JSON object per line with MDC (request_id, tenant_id). Never logs prompts or keys. -->
+    <springProfile name="prod">
+        <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+                <includeMdcKeyName>request_id</includeMdcKeyName>
+                <includeMdcKeyName>tenant_id</includeMdcKeyName>
+                <fieldNames>
+                    <timestamp>ts</timestamp>
+                    <version>[ignore]</version>
+                    <levelValue>[ignore]</levelValue>
+                </fieldNames>
+            </encoder>
+        </appender>
+        <root level="INFO">
+            <appender-ref ref="JSON"/>
+        </root>
+    </springProfile>
+
+    <springProfile name="!prod">
+        <include resource="org/springframework/boot/logging/logback/console-appender.xml"/>
+        <root level="INFO">
+            <appender-ref ref="CONSOLE"/>
+        </root>
+    </springProfile>
+</configuration>
