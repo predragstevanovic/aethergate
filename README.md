@@ -6,7 +6,7 @@ protected provider chain, and settles to the exact micro-cent in an append-only 
 questions are answered from a pgvector semantic cache at $0. Tenants are isolated by PostgreSQL
 Row-Level Security.
 
-**Console:** _deploying_ · **API:** [138-2-169-195.sslip.io](https://138-2-169-195.sslip.io/actuator/health) · one-click *Continue with Demo Workspace*, no signup
+**Console:** [aethergate-console.vercel.app](https://aethergate-console.vercel.app) · **API:** [138-2-169-195.sslip.io](https://138-2-169-195.sslip.io/actuator/health) · one-click *Continue with Demo Workspace*, no signup
 
 | | |
 |---|---|
@@ -14,7 +14,7 @@ Row-Level Security.
 | **Data** | Supabase PostgreSQL 17 · pgvector (HNSW) · Row-Level Security · Supabase Auth (ES256 JWKS) |
 | **Frontend** | React 19 · TypeScript · Vite · Tailwind CSS 4 · Recharts — on Vercel |
 | **Ops** | Multi-stage Docker (JRE 21 Alpine, non-root) · Caddy automatic HTTPS · Oracle Cloud Always Free |
-| **Docs** | [System design + ADRs](SYSTEM_DESIGN.md) · [Build blueprint](CLAUDE.md) · [Frontend standard](REACT_FRONTEND_VETERAN_SKILL.md) |
+| **Docs** | [Deployment explained](docs/DEPLOYMENT_EXPLAINED.md) · [Demo data & live demo](docs/DEMO_DATA_AND_LIVE_DEMO.md) · [System design + ADRs](SYSTEM_DESIGN.md) · [Build blueprint](CLAUDE.md) · [Frontend standard](REACT_FRONTEND_VETERAN_SKILL.md) |
 
 ## What it demonstrates
 

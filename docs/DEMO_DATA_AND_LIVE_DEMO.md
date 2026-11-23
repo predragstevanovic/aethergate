@@ -65,8 +65,9 @@ Pravi tenanti i drugi projekti u istoj bazi se ne diraju. Na kraju se automatski
   PASS  1. Funds equation: TOP_UP - SETTLE = available + reserved (every tenant)
   PASS  2. Holds: RESERVE = SETTLE + RELEASE + open reservations
   ...
-  PASS  9. RLS isolation across all tenant tables
-  PASS 10. Ledger is append-only (UPDATE rejected by trigger)
+  PASS  7. RLS isolation across all tenant tables     2136 foreign ledger rows exist, 0 visible
+  PASS  8. Ledger is append-only (UPDATE rejected by trigger)
+  ...
   10/10 checks passed
 ```
 
@@ -126,7 +127,7 @@ sequenceDiagram
 
 ## 3. Bez terminala: sve se može i kliktanjem u konzoli
 
-1. **Continue with Demo Workspace** otvara Vortex tenant sa 30 dana istorije.
+1. https://aethergate-console.vercel.app → **Continue with Demo Workspace** otvara Vortex tenant sa 30 dana istorije.
 2. **Playground & Chaos:** pošalji prompt, pa isti ponovo (keš HIT ⚡). Zatim uključi *Simulate provider failure*,
    pa breaker prelazi u OPEN i dolazi do failover-a.
 3. **Ledger Audit:** filtriraj po `request_id` i pokaži tri stavke istog zahteva.
@@ -138,6 +139,6 @@ sequenceDiagram
 
 - [ ] Ujutru: ▶ **AetherGate Seed demo data** i proveri da je audit `10/10 checks passed`.
 - [ ] `curl https://138-2-169-195.sslip.io/actuator/health` vraća `UP`.
-- [ ] Otvori konzolu i klikni *Continue with Demo Workspace* (prvi login malo traje).
+- [ ] Otvori https://aethergate-console.vercel.app i klikni *Continue with Demo Workspace* (prvi login malo traje).
 - [ ] Jednom "na suvo" pokreni `./scripts/live-demo.sh` (između pokretanja sačekaj 30 s, da se breaker zatvori).
 - [ ] Rezervni plan bez interneta: backend iz IntelliJ-a i `API=http://localhost:8088`.

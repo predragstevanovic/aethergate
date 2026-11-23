@@ -1,6 +1,6 @@
 # Kako je AetherGate deployovan: slikovito objašnjenje
 
-> **Živi API:** `https://138-2-169-195.sslip.io`. Probaj [`/actuator/health`](https://138-2-169-195.sslip.io/actuator/health).
+> **Konzola:** https://aethergate-console.vercel.app · **Živi API:** `https://138-2-169-195.sslip.io`. Probaj [`/actuator/health`](https://138-2-169-195.sslip.io/actuator/health).
 >
 > Test podaci i skripta za živu demonstraciju: [DEMO_DATA_AND_LIVE_DEMO.md](DEMO_DATA_AND_LIVE_DEMO.md).
 >
