@@ -14,7 +14,7 @@ flowchart LR
     end
     DB[("Supabase Postgres<br/>ledger · logovi · keš")]
     UI["React konzola<br/>Overview · Ledger · Playground"]
-    S -->|"briše i ponovo puni<br/>SAMO 2 demo tenanta"| DB
+    S -->|"briše i ponovo puni<br/>SAMO 3 seed tenanta"| DB
     L -->|"pravi /v1 zahtevi"| DB
     T --> DB
     DB --> UI
@@ -26,13 +26,13 @@ flowchart LR
 
 ### Šta generiše
 
-| | Vortex AI Labs | Helix Robotics |
-|---|---|---|
-| Zahteva u 30 dana | 1.450 | 900 |
-| Provajderi (primarni → rezervni) | gpt-4o → claude-sonnet-4-5 | claude-haiku-4-5 → gemini-2.5-flash |
-| Keš HIT-ova (realno ~20%) | ~280 | ~200 |
-| Failover-a (~3%) i ispada oba provajdera (~0,4%) | ✔ | ✔ |
-| Dopune kredita | $100 početno + $50 karticom | $100 |
+| | Vortex AI Labs | Helix Robotics | Nimbus Health |
+|---|---|---|---|
+| Zahteva u 30 dana | 1.450 | 900 | 1.200 |
+| Provajderi (primarni → rezervni) | gpt-4o → claude-sonnet-4-5 | claude-haiku-4-5 → gemini-2.5-flash | gpt-4o-mini → gemini-2.5-flash |
+| Keš HIT-ova (realno ~20%) | ~300 | ~190 | (vidi izlaz seed-a) |
+| Failover-a (~3%) i ispada oba provajdera (~0,4%) | ✔ | ✔ | ✔ |
+| Dopune kredita | $100 početno + $50 karticom | $100 | $100 |
 
 ### Zašto podaci izgledaju *stvarno*, a ne nasumično
 
@@ -53,7 +53,7 @@ flowchart LR
 
 ### Bezbednost: šta seed briše
 
-Seed briše i ponovo puni **samo dva demo tenanta**, po fiksnim UUID-ovima, u jednoj transakciji.
+Seed briše i ponovo puni **samo tri seed tenanta** (Vortex, Helix, Nimbus), po fiksnim UUID-ovima, u jednoj transakciji.
 Pravi tenanti i drugi projekti u istoj bazi se ne diraju. Na kraju se automatski pokreće
 **audit od 10 provera**, na primer:
 - da li je ledger izbalansiran;
@@ -135,7 +135,42 @@ sequenceDiagram
 
 ---
 
-## 4. Ček-lista pre prezentacije
+## 4. Tri tenanta, tri odvojena login-a: dokaz multi-tenancy-ja uživo
+
+| Tenant | Kako se ulazi | Provajderi (primarni → rezervni) | Istorija |
+|---|---|---|---|
+| **Vortex AI Labs** | dugme *Continue with Demo Workspace* | gpt-4o → claude-sonnet-4-5 | 1.450 zahteva |
+| **Helix Robotics** | email + lozinka (`helix.admin@…`) | claude-haiku-4-5 → gemini-2.5-flash | 900 zahteva |
+| **Nimbus Health** | email + lozinka (`nimbus.admin@…`) | gpt-4o-mini → gemini-2.5-flash | 1.200 zahteva |
+
+> Lozinke se **ne nalaze u repou**. Čuvaju se lokalno, van gita.
+
+```mermaid
+flowchart LR
+    U1["👤 demo@…"] -->|"JWT sub = A"| G
+    U2["👤 helix.admin@…"] -->|"JWT sub = B"| G
+    U3["👤 nimbus.admin@…"] -->|"JWT sub = C"| G
+    G["Spring Security<br/>proverava ES256 potpis (JWKS)"] --> R["tenants.owner_user_id = sub<br/>→ tenant_id"]
+    R --> TX["transakcija:<br/>SET app.current_tenant_id<br/>SET ROLE aethergate_app"]
+    TX --> DB[("PostgreSQL RLS<br/>USING tenant_id = current_tenant_id()")]
+```
+
+**Kako to radi:**
+- Supabase Auth izdaje JWT čiji je `sub` ID korisnika.
+- Backend proverava potpis i pronalazi tenant preko `tenants.owner_user_id`. Unique indeks garantuje jedan tenant po korisniku.
+- Zatim **u istoj transakciji** prebacuje bazu na tog tenanta i ulogu bez `BYPASSRLS`.
+- Čak i da upit u kodu zaboravi `WHERE tenant_id = …`, PostgreSQL sam ne vraća tuđe redove.
+
+**Scenario za prezentaciju (2 minuta):**
+1. Normalan prozor: login kao **Helix**. Pokaži saldo, modele (claude-haiku) i Ledger.
+2. Incognito prozor: login kao **Nimbus**. Pokaži potpuno druge brojeve i modele (gpt-4o-mini).
+3. U oba prozora na Overview-u stoji *"N foreign ledger rows in DB · 0 visible"*. Podaci su u istoj tabeli, a ipak nevidljivi.
+4. U Helix-u pošalji prompt iz Playground-a, pa osveži Nimbus: tamo se ništa nije promenilo.
+5. Bonus: pošalji isti prompt u oba tenanta. Keš je **po tenantu**, pa drugi tenant dobija MISS, a ne tuđi odgovor.
+
+---
+
+## 5. Ček-lista pre prezentacije
 
 - [ ] Ujutru: ▶ **AetherGate Seed demo data** i proveri da je audit `10/10 checks passed`.
 - [ ] `curl https://138-2-169-195.sslip.io/actuator/health` vraća `UP`.

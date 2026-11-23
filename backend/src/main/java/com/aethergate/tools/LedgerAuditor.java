@@ -143,13 +143,13 @@ public class LedgerAuditor {
                        coalesce(sum(l.total_cost_usd), 0) as spend, coalesce(sum(l.saved_cost_usd), 0) as saved,
                        coalesce(round(avg(l.ttft_ms) filter (where l.cache_status = 'MISS')), 0) as ttft
                 from tenants t left join llm_request_logs l on l.tenant_id = t.id and l.created_at > now() - interval '30 days'
-                where t.is_demo
+                where t.id in (?, ?, ?)
                 group by t.id order by t.name""", rs -> {
             out.add(String.format("%-18s %12s %10s %8d %6s%% %12s %12s %9d", rs.getString(1), "$" + rs.getBigDecimal(2).setScale(4, java.math.RoundingMode.HALF_UP),
                     "$" + rs.getBigDecimal(3).setScale(4, java.math.RoundingMode.HALF_UP), rs.getLong(4), rs.getBigDecimal(5),
                     "$" + rs.getBigDecimal(6).setScale(4, java.math.RoundingMode.HALF_UP),
                     "$" + rs.getBigDecimal(7).setScale(4, java.math.RoundingMode.HALF_UP), rs.getLong(8)));
-        });
+        }, DemoDataSeeder.SEEDED.toArray());
         out.add("");
         out.add("Latest ledger lines (Vortex AI Labs):");
         jdbc.query("""

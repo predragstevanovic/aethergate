@@ -38,6 +38,8 @@ public class DemoDataSeeder {
 
     static final UUID VORTEX = UUID.fromString("7f1c2a9e-4b3d-4e8a-9c61-2d5e8f0a1b01");
     static final UUID HELIX = UUID.fromString("3b8e5d21-9a4c-4f7e-b2d6-81c0e7f9a402");
+    static final UUID NIMBUS = UUID.fromString("c4d7a913-5e2b-4f80-a6c1-9b3e7d2f1c03");
+    static final List<UUID> SEEDED = List.of(VORTEX, HELIX, NIMBUS);
 
     private record Model(String provider, String name, BigDecimal in, BigDecimal out) {}
 
@@ -74,6 +76,20 @@ public class DemoDataSeeder {
             "Estimate battery runtime for a 6-hour warehouse shift",
             "Generate unit test cases for the inverse kinematics solver");
 
+    private static final List<String> NIMBUS_PROMPTS = List.of(
+            "Summarize this discharge note for the patient in plain language",
+            "Extract medication names and dosages from this referral letter",
+            "Draft an appointment reminder SMS in English and Spanish",
+            "Classify this patient message by urgency",
+            "Map these symptoms to ICD-10 candidate codes for coder review",
+            "Explain our data retention policy for clinical chat logs",
+            "Turn this triage call transcript into a structured intake form",
+            "What is the difference between PHI and de-identified data?",
+            "Write a FHIR query that lists today's lab results for a ward",
+            "Rewrite this consent form paragraph at a 6th-grade reading level",
+            "Summarize the on-call handover notes for the morning shift",
+            "How does the metering ledger reserve budget?");
+
     private final JdbcTemplate jdbc;
     private final TransactionTemplate tx;
     private final MockLlmEngine engine;
@@ -94,7 +110,11 @@ public class DemoDataSeeder {
                 new Plan(HELIX, "Helix Robotics", 900,
                         new Model("ANTHROPIC", "claude-haiku-4-5", new BigDecimal("1.00"), new BigDecimal("5.00")),
                         new Model("GEMINI", "gemini-2.5-flash", new BigDecimal("0.30"), new BigDecimal("2.50")),
-                        HELIX_PROMPTS, 600, 4200, 1024, List.of(new BigDecimal("100"))));
+                        HELIX_PROMPTS, 600, 4200, 1024, List.of(new BigDecimal("100"))),
+                new Plan(NIMBUS, "Nimbus Health", 1200,
+                        new Model("OPENAI", "gpt-4o-mini", new BigDecimal("0.15"), new BigDecimal("0.60")),
+                        new Model("GEMINI", "gemini-2.5-flash", new BigDecimal("0.30"), new BigDecimal("2.50")),
+                        NIMBUS_PROMPTS, 250, 1800, 800, List.of(new BigDecimal("100"))));
         List<String> report = new ArrayList<>();
         for (Plan plan : plans) {
             report.add(tx.execute(s -> seedTenant(plan, now)));
