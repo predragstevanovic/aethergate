@@ -10,6 +10,7 @@ import { LoginPage } from './pages/LoginPage'
 const OverviewPage = lazy(() => import('./pages/OverviewPage').then((m) => ({ default: m.OverviewPage })))
 const PlaygroundChaosPage = lazy(() => import('./pages/PlaygroundChaosPage').then((m) => ({ default: m.PlaygroundChaosPage })))
 const LedgerAuditPage = lazy(() => import('./pages/LedgerAuditPage').then((m) => ({ default: m.LedgerAuditPage })))
+const GuardrailsPage = lazy(() => import('./pages/GuardrailsPage').then((m) => ({ default: m.GuardrailsPage })))
 const ProjectsPage = lazy(() => import('./pages/ProjectsPage').then((m) => ({ default: m.ProjectsPage })))
 const ApiKeysRoutingPage = lazy(() => import('./pages/ApiKeysRoutingPage').then((m) => ({ default: m.ApiKeysRoutingPage })))
 
@@ -54,6 +55,7 @@ const router = createBrowserRouter([
           { path: '/playground', element: page(<PlaygroundChaosPage />) },
           { path: '/ledger', element: page(<LedgerAuditPage />) },
           { path: '/projects', element: page(<ProjectsPage />) },
+          { path: '/guardrails', element: page(<GuardrailsPage />) },
           { path: '/settings', element: page(<ApiKeysRoutingPage />) },
         ],
       },

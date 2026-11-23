@@ -89,6 +89,11 @@ public class TenantDirectoryService {
         return readTx.execute(status -> tenants.findBySlug(slug).map(Tenant::getOwnerUserId));
     }
 
+    /** Drops the cached workspace of a user (e.g. after a rename) so /me shows fresh data. */
+    public void evictOwner(UUID userId) {
+        ownerCache.invalidate(userId);
+    }
+
     /** Points a (demo) tenant at a Supabase Auth user. Owner-level maintenance, used by the demo login. */
     public void bindOwner(String slug, UUID userId) {
         tx.executeWithoutResult(status -> tenants.findBySlug(slug).ifPresent(t -> {

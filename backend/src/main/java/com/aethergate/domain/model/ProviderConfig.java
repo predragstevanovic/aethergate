@@ -53,6 +53,13 @@ public class ProviderConfig extends AssignedIdEntity {
     }
 
     public void setPriorityOrder(int priorityOrder) { this.priorityOrder = priorityOrder; }
+
+    /** New model name and/or prices; the very next pre-flight hold is priced with them. */
+    public void reprice(String newModelName, BigDecimal newInputCostPer1m, BigDecimal newOutputCostPer1m) {
+        this.modelName = newModelName;
+        this.inputCostPer1m = newInputCostPer1m;
+        this.outputCostPer1m = newOutputCostPer1m;
+    }
     public void setEnabled(boolean enabled) { this.enabled = enabled; }
 
     @Override

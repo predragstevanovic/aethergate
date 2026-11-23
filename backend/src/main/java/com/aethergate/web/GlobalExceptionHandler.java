@@ -1,9 +1,11 @@
 package com.aethergate.web;
 
+import com.aethergate.service.guardrail.GuardrailBlockedException;
+import com.aethergate.service.tenant.DemoReadOnlyException;
 import com.aethergate.service.metering.ProjectBudgetExceededException;
 import com.aethergate.service.project.ProjectArchivedException;
-import com.aethergate.service.project.ProjectConflictException;
-import com.aethergate.service.project.StaleVersionException;
+import com.aethergate.service.ResourceConflictException;
+import com.aethergate.service.StaleVersionException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import com.aethergate.service.auth.DemoUnavailableException;
@@ -56,13 +58,26 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         return p;
     }
 
+    @ExceptionHandler(GuardrailBlockedException.class)
+    ProblemDetail guardrailBlocked(GuardrailBlockedException e, HttpServletRequest req) {
+        ProblemDetail p = problem(HttpStatus.UNPROCESSABLE_ENTITY, "guardrail-blocked", e.getMessage(), req);
+        p.setProperty("rule", e.getRule());
+        p.setProperty("matches", e.getMatches());
+        return p;
+    }
+
+    @ExceptionHandler(DemoReadOnlyException.class)
+    ProblemDetail demoReadOnly(DemoReadOnlyException e, HttpServletRequest req) {
+        return problem(HttpStatus.FORBIDDEN, "demo-read-only", e.getMessage(), req);
+    }
+
     @ExceptionHandler(ProjectArchivedException.class)
     ProblemDetail projectArchived(ProjectArchivedException e, HttpServletRequest req) {
         return problem(HttpStatus.CONFLICT, "project-archived", e.getMessage(), req);
     }
 
-    @ExceptionHandler(ProjectConflictException.class)
-    ProblemDetail conflict(ProjectConflictException e, HttpServletRequest req) {
+    @ExceptionHandler(ResourceConflictException.class)
+    ProblemDetail conflict(ResourceConflictException e, HttpServletRequest req) {
         return problem(HttpStatus.CONFLICT, "conflict", e.getMessage(), req);
     }
 

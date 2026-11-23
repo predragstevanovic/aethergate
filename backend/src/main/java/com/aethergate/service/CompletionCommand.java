@@ -11,4 +11,9 @@ public record CompletionCommand(GatewayPrincipal principal, String model, List<C
     public CompletionCommand {
         messages = List.copyOf(messages);
     }
+
+    /** Same request with guardrail-redacted messages: providers and the cache never see the original text. */
+    public CompletionCommand withMessages(List<ChatMessage> redacted) {
+        return new CompletionCommand(principal, model, redacted, maxTokens, simulatePrimaryFailure);
+    }
 }

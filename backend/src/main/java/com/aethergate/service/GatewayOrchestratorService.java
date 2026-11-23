@@ -5,6 +5,7 @@ import com.aethergate.config.TenantContext;
 import com.aethergate.domain.model.LlmRequestLog;
 import com.aethergate.service.cache.CacheHit;
 import com.aethergate.service.cache.SemanticCacheService;
+import com.aethergate.service.guardrail.GuardrailEnforcer;
 import com.aethergate.service.llm.AllProvidersFailedException;
 import com.aethergate.service.llm.ChatMessage;
 import com.aethergate.service.llm.LlmRouterService;
@@ -39,7 +40,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
 /**
- * The gateway pipeline: Auth (done by the filter) → Rate limit → Semantic cache → Reserve →
+ * The gateway pipeline: Auth (done by the filter) → Rate limit → Guardrails → Semantic cache → Reserve →
  * Route/stream → Settle → Log → Cache store.
  *
  * <p>{@link #prepare} runs on the request thread and may throw 402/429/503 while the HTTP
@@ -62,13 +63,16 @@ public class GatewayOrchestratorService {
     private final MeteringLedgerService ledger;
     private final LlmRouterService router;
     private final RequestLogService requestLogs;
+    private final GuardrailEnforcer guardrails;
     private final Executor cacheWriter;
     private final int defaultMaxTokens;
     private final LongSupplier clockMillis;
 
     public GatewayOrchestratorService(RateLimiterService rateLimiter, SemanticCacheService cache, TenantAdminService admin,
                                       MeteringLedgerService ledger, LlmRouterService router, RequestLogService requestLogs,
-                                      @Qualifier("cacheWriteExecutor") Executor cacheWriter, AetherGateProperties properties) {
+                                      GuardrailEnforcer guardrails, @Qualifier("cacheWriteExecutor") Executor cacheWriter,
+                                      AetherGateProperties properties) {
+        this.guardrails = guardrails;
         this.rateLimiter = rateLimiter;
         this.cache = cache;
         this.admin = admin;
@@ -80,7 +84,8 @@ public class GatewayOrchestratorService {
         this.clockMillis = System::currentTimeMillis;
     }
 
-    public GatewayExecution prepare(CompletionCommand cmd) {
+    public GatewayExecution prepare(CompletionCommand request) {
+        CompletionCommand cmd = request;
         long start = clockMillis.getAsLong();
         GatewayPrincipal principal = cmd.principal();
         UUID tenantId = principal.tenantId();
@@ -88,13 +93,20 @@ public class GatewayOrchestratorService {
         int maxTokens = Math.clamp(cmd.maxTokens() == null ? defaultMaxTokens : cmd.maxTokens(), 1, MAX_COMPLETION_TOKENS);
         int promptTokens = TokenEstimator.countPrompt(cmd.messages());
         String cacheModel = cmd.model() == null || cmd.model().isBlank() ? "auto" : cmd.model();
-        String cacheKey = canonicalPrompt(cmd.messages());
 
         RateLimiterService.Usage usage = rateLimiter.acquire(principal.limits(), promptTokens);
 
+        // BLOCK throws 422 here (no hold, no cost); REDACT rewrites the prompt before cache, providers and logs see it
+        var verdict = guardrails.enforce(tenantId, requestId, cmd.messages());
+        int redactions = verdict.redactions();
+        if (redactions > 0) {
+            cmd = cmd.withMessages(verdict.messages());
+        }
+        String cacheKey = canonicalPrompt(cmd.messages());
+
         Optional<CacheHit> hit = TenantContext.callAs(tenantId, () -> cache.lookup(cacheModel, cacheKey));
         if (hit.isPresent()) {
-            return new CachedExecution(requestId, principal, usage, hit.get(), promptTokens, start);
+            return new CachedExecution(requestId, principal, usage, hit.get(), promptTokens, start, redactions);
         }
 
         List<RouteTarget> chain = TenantContext.callAs(tenantId, admin::routeChain);
@@ -108,7 +120,9 @@ public class GatewayOrchestratorService {
         Reservation reservation = TenantContext.callAs(tenantId, () -> ledger.reserveBudget(requestId, hold,
                 "Pre-flight hold: " + promptTokens + " prompt + " + maxTokens + " max completion tokens",
                 principal.projectId()));
-        return new LiveExecution(requestId, principal, usage, cmd, chain, reservation, maxTokens, cacheModel, cacheKey, start);
+        CompletionCommand admitted = cmd;
+        return new LiveExecution(requestId, principal, usage, admitted, chain, reservation, maxTokens, cacheModel, cacheKey,
+                start, redactions);
     }
 
     /** Conversation as one string: the cache key covers the whole context, not just the last turn. */
@@ -155,9 +169,12 @@ public class GatewayOrchestratorService {
         private final CacheHit hit;
         private final int promptTokens;
         private final long start;
+        private final int redactions;
 
+        @SuppressWarnings("java:S107")
         CachedExecution(String requestId, GatewayPrincipal principal, RateLimiterService.Usage usage, CacheHit hit,
-                        int promptTokens, long start) {
+                        int promptTokens, long start, int redactions) {
+            this.redactions = redactions;
             this.requestId = requestId;
             this.principal = principal;
             this.usage = usage;
@@ -185,7 +202,7 @@ public class GatewayOrchestratorService {
             log.info("cache HIT request={} similarity={} saved=${}", requestId, String.format("%.4f", hit.similarity()), saved);
             return new CompletionOutcome(requestId, "HIT", "CACHE", hit.modelName(), false, promptTokens,
                     hit.completionTokens(), ZERO, ZERO, ZERO, saved, timing.ttftMs(), latency, false, List.of(), "stop",
-                    hit.responseText(), hit.similarity());
+                    hit.responseText(), hit.similarity(), redactions);
         }
     }
 
@@ -200,11 +217,13 @@ public class GatewayOrchestratorService {
         private final String cacheModel;
         private final String cacheKey;
         private final long start;
+        private final int redactions;
 
         @SuppressWarnings("java:S107")
         LiveExecution(String requestId, GatewayPrincipal principal, RateLimiterService.Usage usage, CompletionCommand cmd,
                       List<RouteTarget> chain, Reservation reservation, int maxTokens, String cacheModel, String cacheKey,
-                      long start) {
+                      long start, int redactions) {
+            this.redactions = redactions;
             this.requestId = requestId;
             this.principal = principal;
             this.usage = usage;
@@ -272,7 +291,7 @@ public class GatewayOrchestratorService {
             return new CompletionOutcome(requestId, "MISS", target.provider().name(), target.model(), live,
                     result.promptTokens(), result.completionTokens(), settlement.reservedUsd(), settlement.settledUsd(),
                     settlement.releasedUsd(), ZERO, timing.ttftMs(), latency, failover, attempts, result.finishReason(),
-                    result.text(), null);
+                    result.text(), null, redactions);
         }
 
         private void storeInCache(UUID tenantId, String text, BigDecimal cost, int completionTokens) {

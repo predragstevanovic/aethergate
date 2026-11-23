@@ -12,4 +12,4 @@ public record CompletionOutcome(String requestId, String cacheStatus, String pro
                                 int promptTokens, int completionTokens, BigDecimal reservedUsd, BigDecimal settledUsd,
                                 BigDecimal releasedUsd, BigDecimal savedUsd, int ttftMs, int latencyMs,
                                 boolean failoverTriggered, List<String> attempts, String finishReason, String text,
-                                Double cacheSimilarity) {}
+                                Double cacheSimilarity, int redactions) {}

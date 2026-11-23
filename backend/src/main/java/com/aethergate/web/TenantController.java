@@ -7,8 +7,12 @@ import com.aethergate.service.tenant.AdminViews.ProviderView;
 import com.aethergate.service.tenant.AdminViews.TopUpResult;
 import com.aethergate.service.tenant.TenantAdminService;
 import com.aethergate.service.tenant.TenantRef;
+import com.aethergate.service.tenant.WorkspaceService;
+import com.aethergate.service.tenant.WorkspaceService.WorkspaceSettings;
 import com.aethergate.web.dto.AssignKeyProjectRequest;
 import com.aethergate.web.dto.CreateApiKeyRequest;
+import com.aethergate.web.dto.ProviderRequest;
+import com.aethergate.web.dto.WorkspaceSettingsRequest;
 import com.aethergate.web.dto.ReorderProvidersRequest;
 import com.aethergate.web.dto.ToggleProviderRequest;
 import com.aethergate.web.dto.TopUpRequest;
@@ -16,6 +20,7 @@ import jakarta.validation.Valid;
 import java.util.List;
 import java.util.UUID;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -29,17 +34,29 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
-/** Tenant self-service: API keys, LLM routing priority, credit. */
+/** Tenant self-service: workspace settings, API keys, the model catalog / fallback chain, credit. */
 @RestController
 @RequestMapping("/api/v1/tenant")
 public class TenantController {
 
     private final CurrentTenant currentTenant;
     private final TenantAdminService admin;
+    private final WorkspaceService workspace;
 
-    public TenantController(CurrentTenant currentTenant, TenantAdminService admin) {
+    public TenantController(CurrentTenant currentTenant, TenantAdminService admin, WorkspaceService workspace) {
         this.currentTenant = currentTenant;
         this.admin = admin;
+        this.workspace = workspace;
+    }
+
+    @GetMapping("/settings")
+    public WorkspaceSettings settings(@AuthenticationPrincipal Jwt jwt) {
+        return TenantContext.callAs(currentTenant.of(jwt).id(), workspace::get);
+    }
+
+    @PutMapping("/settings")
+    public WorkspaceSettings updateSettings(@AuthenticationPrincipal Jwt jwt, @Valid @RequestBody WorkspaceSettingsRequest body) {
+        return TenantContext.callAs(currentTenant.of(jwt).id(), () -> workspace.update(body.name(), body.hardBudgetLimitUsd()));
     }
 
     @GetMapping("/api-keys")
@@ -69,6 +86,25 @@ public class TenantController {
     @GetMapping("/providers")
     public List<ProviderView> providers(@AuthenticationPrincipal Jwt jwt) {
         return TenantContext.callAs(currentTenant.of(jwt).id(), admin::listProviders);
+    }
+
+    @PostMapping("/providers")
+    @ResponseStatus(HttpStatus.CREATED)
+    public ProviderView addProvider(@AuthenticationPrincipal Jwt jwt, @Valid @RequestBody ProviderRequest body) {
+        return TenantContext.callAs(currentTenant.of(jwt).id(), () -> admin.addProvider(body.provider(), body.modelName(),
+                body.inputCostPer1m(), body.outputCostPer1m()));
+    }
+
+    @PutMapping("/providers/{id}")
+    public ProviderView updateProvider(@AuthenticationPrincipal Jwt jwt, @PathVariable UUID id, @Valid @RequestBody ProviderRequest body) {
+        return TenantContext.callAs(currentTenant.of(jwt).id(), () -> admin.updateProvider(id, body.modelName(),
+                body.inputCostPer1m(), body.outputCostPer1m()));
+    }
+
+    @DeleteMapping("/providers/{id}")
+    public ResponseEntity<Void> deleteProvider(@AuthenticationPrincipal Jwt jwt, @PathVariable UUID id) {
+        TenantContext.runAs(currentTenant.of(jwt).id(), () -> admin.deleteProvider(id));
+        return ResponseEntity.noContent().build();
     }
 
     @PutMapping("/providers/order")

@@ -91,6 +91,8 @@ erDiagram
     PROJECTS |o--o{ API_KEYS : groups
     PROJECTS |o--o{ LEDGER_ENTRIES : "is charged"
     PROJECTS |o--o{ LLM_REQUEST_LOGS : attributes
+    TENANTS ||--o{ GUARDRAIL_RULES : defines
+    GUARDRAIL_RULES |o--o{ GUARDRAIL_EVENTS : "fired as"
 
     TENANTS {
         uuid id PK
@@ -111,6 +113,27 @@ erDiagram
         string status "ACTIVE, ARCHIVED"
         bigint version "optimistic lock / ETag"
         timestamp archived_at
+    }
+
+    GUARDRAIL_RULES {
+        uuid id PK
+        uuid tenant_id FK "UNIQUE (tenant_id, id)"
+        string name "unique per tenant, case-insensitive"
+        string rule_type "KEYWORDS, REGEX, PII_EMAIL, PII_CARD"
+        string pattern "only KEYWORDS / REGEX (CHECK)"
+        string action "BLOCK, REDACT"
+        boolean is_enabled
+        bigint version "ETag"
+    }
+
+    GUARDRAIL_EVENTS {
+        uuid id PK
+        uuid tenant_id FK
+        uuid rule_id FK "(tenant_id, rule_id) ON DELETE SET NULL"
+        string rule_name "snapshot: survives rename/delete"
+        string action
+        string request_id
+        int matches
     }
 
     API_KEYS {
@@ -211,6 +234,37 @@ stateDiagram-v2
 | `RESERVE`, `SETTLE` and `RELEASE` of one request share one project | settle/release copy `project_id` from the hold; verified by the live audit |
 | Moving a key to another project changes where *future* requests are charged; history stays put | `PATCH /tenant/api-keys/{id}` + key-cache eviction |
 
+### 4.4. Guardrails: prompt policies enforced before anything is spent
+
+```mermaid
+flowchart LR
+    A["auth"] --> RL["rate limit"] --> G{"guardrails<br/>(compiled, cached per tenant)"}
+    G -- "BLOCK matched" --> X["422 guardrail-blocked<br/>no hold · no cost · event logged"]
+    G -- "REDACT matched" --> M["prompt masked:<br/>[REDACTED:rule]"] --> C["semantic cache"]
+    G -- "no match" --> C
+    C --> H["pre-flight hold"] --> P["provider"]
+```
+
+| Concern | Design |
+|---|---|
+| Placement | After rate limiting (abuse still counts against RPM), **before** the semantic cache, the ledger and any provider: a blocked prompt costs nothing, and a redacted prompt is the only version the cache, the providers and the request log ever see. |
+| Rule types | `PII_EMAIL`, `PII_CARD` (13–19 digits, card-network prefix 2–6 **and** Luhn checksum, so order numbers and millisecond timestamps do not match), `KEYWORDS` (whole words, case-insensitive, metacharacters quoted), `REGEX` (≤ 500 chars). |
+| Precedence | Any BLOCK match wins and nothing is redacted; otherwise REDACT rules mask in order. |
+| ReDoS | Java regex has no timeout, so the matcher reads the prompt through a `CharSequence` that checks a 25 ms deadline every 1,024 reads. A runaway pattern **fails closed** (the request is blocked), never open. Patterns that match the empty string are rejected at save time. |
+| Validation | Every rule is compiled on save (invalid regex → 400 with the reason), never on the request path. |
+| Caching | Compiled rules are cached per tenant (Caffeine, 30 s TTL); CRUD publishes `GuardrailsChanged` and a `@TransactionalEventListener` drops the entry **after commit**, so a disabled rule stops applying on the very next request. |
+| Audit trail | `guardrail_events` stores the rule **name snapshot**, request id and match count; deleting a rule keeps its history. |
+| CRUD | `GET/POST /tenant/guardrails`, `PUT /{id}` with `If-Match` (428/412), `PATCH /{id}` enable/disable, `DELETE /{id}`, `POST /test` dry run (nothing recorded). Max 20 rules. |
+
+### 4.5. Model catalog and workspace settings
+
+| Operation | Rule |
+|---|---|
+| `POST /tenant/providers` | OPENAI / ANTHROPIC / GEMINI only (the simulator type is internal); unique `(provider, lower(model))` per tenant (index + 409); appended at the end of the chain; max 6. |
+| `PUT /tenant/providers/{id}` | New model name / prices; the **next** pre-flight hold uses them (holds are priced at the most expensive enabled model), holds already taken keep theirs. |
+| `DELETE /tenant/providers/{id}` | Closes the priority gap (deferrable unique constraint); the last enabled model can never be removed (409). |
+| `GET/PUT /tenant/settings` | Name + monthly hard limit. The limit can never be set below the month's committed spend (settled + reserved). The update takes the **same tenant row lock** as metering instead of an ETag (ADR-014). The shared demo workspace is read-only (403 `demo-read-only`). `/me` is refreshed after commit. |
+
 ---
 
 ## 5. Architecture Decision Records (ADRs)
@@ -263,6 +317,14 @@ stateDiagram-v2
 - **Decision:** Projects with history are archived (soft lifecycle state), never deleted; `DELETE` is allowed only for never-used projects. Edits are full replacements (`PUT`) guarded by `If-Match` on a JPA `@Version` ETag.
 - **Rationale:** The ledger is append-only and must keep pointing at the project it charged, so history wins over tidiness. Two admins editing the same budget in two tabs is realistic; the second save gets 412 with the current version instead of silently overwriting the first (the "lost update").
 
+### ADR-013: Guardrails sit before the cache and fail closed
+- **Decision:** Enforce tenant prompt policies inside the gateway pipeline, after rate limiting and before the semantic cache and the pre-flight hold; a regex that exceeds its time budget blocks the request.
+- **Rationale:** Masking after the cache would leave PII in cached prompts; blocking after the hold would create ledger noise for requests that were never allowed. A policy engine that "fails open" under a crafted ReDoS input is a bypass, so timeouts are treated as a match.
+
+### ADR-014: Workspace settings use the row lock, not an ETag
+- **Decision:** `PUT /tenant/settings` has no `If-Match`; it locks the tenant row (`SELECT … FOR UPDATE`) and validates the new limit against committed spend inside that lock.
+- **Rationale:** The tenant row's `@Version` advances with every reservation, so an ETag would be stale within milliseconds under traffic. Projects and guardrails, which only change through CRUD, keep optimistic `If-Match`.
+
 ---
 
 ## 6. As built
@@ -270,17 +332,17 @@ stateDiagram-v2
 | Area | Implementation |
 |---|---|
 | Gateway | `POST /v1/chat/completions` (OpenAI-compatible, SSE or JSON), `GET /v1/models`; auth by `X-API-Key` or `Authorization: Bearer ag_live_…` |
-| Console API | `/api/v1/me`, `/dashboard/overview?range=24h\|7d\|30d`, `/dashboard/ledger`, `/tenant/api-keys` (+ `PATCH` to move a key between projects), `/tenant/projects` (list, create, get, `PUT` with If-Match, `/archive`, `/restore`, `DELETE`), `/tenant/providers`, `/tenant/top-up`, `/playground/completions` (optional `project_id`), `/auth/demo-session` |
-| Errors | RFC 7807 `application/problem+json` with stable `type` URIs (`insufficient-quota` 402, `budget-limit-exceeded` 402, `rate-limited` 429 + `Retry-After`, `providers-unavailable` 503, `upstream-interrupted` 502, `project-budget-exceeded` 402, `project-archived` 409, `conflict` 409, `stale-version` 412, `precondition-required` 428) |
-| Database | Schema `aethergate` (shares a Supabase project safely, not exposed via PostgREST), Flyway V1–V5 (V4 third tenant + named logins, V5 projects with composite tenant-safe FKs), HNSW index, append-only trigger, RLS USING + WITH CHECK on all tenant tables |
+| Console API | `/api/v1/me`, `/dashboard/overview?range=24h\|7d\|30d`, `/dashboard/ledger`, `/tenant/api-keys` (+ `PATCH` to move a key between projects), `/tenant/projects` (list, create, get, `PUT` with If-Match, `/archive`, `/restore`, `DELETE`), `/tenant/guardrails` (CRUD + `PATCH` toggle + `/test` dry run), `/tenant/settings` (GET/PUT), `/tenant/providers` (add, reprice, delete, reorder, toggle), `/tenant/top-up`, `/playground/completions` (optional `project_id`), `/auth/demo-session` |
+| Errors | RFC 7807 `application/problem+json` with stable `type` URIs (`insufficient-quota` 402, `budget-limit-exceeded` 402, `rate-limited` 429 + `Retry-After`, `providers-unavailable` 503, `upstream-interrupted` 502, `project-budget-exceeded` 402, `project-archived` 409, `conflict` 409, `stale-version` 412, `precondition-required` 428, `guardrail-blocked` 422, `demo-read-only` 403) |
+| Database | Schema `aethergate` (shares a Supabase project safely, not exposed via PostgREST), Flyway V1–V6 (V4 third tenant + named logins, V5 projects with composite tenant-safe FKs, V6 guardrails + model catalog), HNSW index, append-only trigger, RLS USING + WITH CHECK on all tenant tables |
 | Demo login | Server-side Supabase password grant; self-healing (resets the demo user via the GoTrue admin API if someone changed its password) |
 
 ## 7. Quality gates
 
 | Gate | Result |
 |---|---|
-| JUnit 5 + AssertJ + Mockito | 106 tests (unit, Testcontainers `pgvector/pgvector:pg17` integration, MockMvc API, ArchUnit) |
+| JUnit 5 + AssertJ + Mockito | 119 tests (unit, Testcontainers `pgvector/pgvector:pg17` integration, MockMvc API, ArchUnit) |
 | JaCoCo (enforced in `mvn verify`) | ≥ 85 % lines **and** branches — currently ~97 % lines / ~88 % branches |
 | Concurrency | 20 simultaneous $0.10 holds on a $1.00 balance → exactly 10 succeed, balance never negative; the same against a $1.00 **project** budget |
 | ArchUnit | controllers never touch repositories, no JPA entities in web layer, DTOs are records, no `synchronized` (virtual-thread pinning), no secret constants |
-| Live audit (`--aethergate.tool=audit`) | 13 invariant checks against the production database (funds equation, hold conservation, per-request split, one project per request, project spend ≤ budget, no holds after archive, RLS visibility incl. projects, trigger, vector shape, key hashing) |
+| Live audit (`--aethergate.tool=audit`) | 13 invariant checks against the production database (funds equation, hold conservation, per-request split, one project per request, project spend ≤ budget, no holds after archive, RLS visibility incl. projects and guardrails, trigger, vector shape, key hashing) |

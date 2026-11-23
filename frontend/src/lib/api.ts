@@ -250,6 +250,50 @@ export interface Telemetry {
   attempts: string[]
   finish_reason: string
   cache_similarity: number | null
+  redactions: number
+}
+
+export type GuardrailType = 'KEYWORDS' | 'REGEX' | 'PII_EMAIL' | 'PII_CARD'
+export type GuardrailAction = 'BLOCK' | 'REDACT'
+
+export interface GuardrailView {
+  id: string
+  name: string
+  type: GuardrailType
+  pattern: string | null
+  action: GuardrailAction
+  enabled: boolean
+  hits30d: number
+  last_hit_at: string | null
+  version: number
+  created_at: string
+  updated_at: string
+}
+
+export interface GuardrailList {
+  rules: GuardrailView[]
+  recent_events: { rule_name: string; action: GuardrailAction; request_id: string; matches: number; created_at: string }[]
+  max_rules: number
+}
+
+export interface GuardrailTestResult {
+  blocked: boolean
+  blocked_by: string | null
+  result_text: string
+  matches: { rule: string; action: GuardrailAction; count: number }[]
+}
+
+export interface WorkspaceSettings {
+  name: string
+  slug: string
+  plan_tier: string
+  demo: boolean
+  hard_budget_limit_usd: Money
+  month_to_date_usd: Money
+  reserved_usd: Money
+  committed_usd: Money
+  available_balance_usd: Money
+  created_at: string
 }
 
 // ── Streaming (SSE over fetch: EventSource cannot POST or send headers) ────────────────

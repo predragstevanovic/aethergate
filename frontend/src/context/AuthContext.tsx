@@ -16,6 +16,8 @@ interface AuthState {
   signUp: (email: string, password: string) => Promise<{ needsConfirmation: boolean }>
   signInDemo: () => Promise<void>
   signOut: () => Promise<void>
+  /** Re-reads /api/v1/me, e.g. after the workspace was renamed. */
+  refreshMe: () => Promise<void>
 }
 
 const AuthContext = createContext<AuthState | null>(null)
@@ -76,9 +78,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await supabase.auth.signOut()
   }, [])
 
+  const refreshMe = useCallback(async () => {
+    setMe(await get<Me>('/api/v1/me'))
+  }, [])
+
   const value = useMemo(
-    () => ({ session, me, ready, signIn, signUp, signInDemo, signOut }),
-    [session, me, ready, signIn, signUp, signInDemo, signOut],
+    () => ({ session, me, ready, signIn, signUp, signInDemo, signOut, refreshMe }),
+    [session, me, ready, signIn, signUp, signInDemo, signOut, refreshMe],
   )
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }

@@ -60,7 +60,7 @@ export function PlaygroundChaosPage() {
     <div className="space-y-8">
       <PageHeader
         title="AI Playground & Chaos Console"
-        description="Runs the real gateway pipeline as this workspace: rate limit → semantic cache → pre-flight hold → routed stream → settlement. Without API keys, providers are served by the built-in deterministic simulator."
+        description="Runs the real gateway pipeline as this workspace: rate limit → guardrails → semantic cache → pre-flight hold → routed stream → settlement. Without API keys, providers are served by the built-in deterministic simulator."
       />
 
       <div className="flex flex-wrap items-center gap-x-6 gap-y-3 rounded-lg border border-line bg-panel px-5 py-3.5">
@@ -69,7 +69,7 @@ export function PlaygroundChaosPage() {
           <CircuitPill key={p.provider + p.priority_order} provider={p.provider} state={p.circuit_state}
             primary={p === primary} enabled={p.enabled} live={p.live} />
         ))}
-        <label className="ml-auto flex items-center gap-2 text-[12px] text-ink-3">
+        <label className="ml-auto flex items-center gap-2 text-[12px] text-ink-3 whitespace-nowrap">
           Charge to
           <select aria-label="Project to charge" className={`${inputClass} h-8 w-48 text-[13px]`} value={projectId} onChange={(e) => setProjectId(e.target.value)}>
             <option value="">Unassigned</option>
@@ -147,6 +147,7 @@ export function PlaygroundChaosPage() {
                   </span>} />
                 <Row label="Model" value={<span className="font-mono text-[12px]">{telemetry.model}</span>} />
                 <Row label="Cache status" value={<Badge tone={telemetry.cache_status === 'HIT' ? 'good' : 'neutral'}>{telemetry.cache_status}</Badge>} />
+                {telemetry.redactions > 0 && <Row label="Guardrail redactions" value={<Badge tone="warn">{telemetry.redactions} masked</Badge>} />}
                 {telemetry.cache_similarity != null && <Row label="Similarity" value={<span className="font-mono num">{telemetry.cache_similarity.toFixed(4)}</span>} />}
                 <div className="border-t border-line my-3" />
                 <Row label="Pre-flight reserved" value={<Money v={telemetry.reserved_usd} />} />

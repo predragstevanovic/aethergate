@@ -1,4 +1,4 @@
-import { FlaskConical, FolderKanban, Gauge, KeyRound, LogOut, Moon, ScrollText, Sun } from 'lucide-react'
+import { FlaskConical, FolderKanban, Gauge, KeyRound, LogOut, Moon, ScrollText, ShieldCheck, Sun } from 'lucide-react'
 import { NavLink, Outlet } from 'react-router'
 import { useAuth } from '../../context/AuthContext'
 import { useTheme } from '../../hooks/useTheme'
@@ -11,7 +11,8 @@ const NAV = [
   { to: '/playground', label: 'Playground', icon: FlaskConical },
   { to: '/ledger', label: 'Ledger', icon: ScrollText },
   { to: '/projects', label: 'Projects', icon: FolderKanban },
-  { to: '/settings', label: 'Keys & Routing', icon: KeyRound },
+  { to: '/guardrails', label: 'Guardrails', icon: ShieldCheck },
+  { to: '/settings', label: 'Settings', icon: KeyRound },
 ]
 
 export function AppShell() {

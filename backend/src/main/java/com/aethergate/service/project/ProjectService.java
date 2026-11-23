@@ -1,5 +1,7 @@
 package com.aethergate.service.project;
 
+import com.aethergate.service.StaleVersionException;
+import com.aethergate.service.ResourceConflictException;
 import com.aethergate.config.TenantContext;
 import com.aethergate.config.TenantScoped;
 import com.aethergate.domain.model.ApiKey;
@@ -126,7 +128,7 @@ public class ProjectService {
     public ProjectView create(ProjectDraft draft) {
         ProjectDraft d = normalise(draft);
         if (projects.countByStatus(ProjectStatus.ACTIVE) >= MAX_ACTIVE_PROJECTS) {
-            throw new ProjectConflictException("A workspace can have at most " + MAX_ACTIVE_PROJECTS
+            throw new ResourceConflictException("A workspace can have at most " + MAX_ACTIVE_PROJECTS
                     + " active projects; archive one first");
         }
         if (projects.existsByStatusAndNameIgnoreCase(ProjectStatus.ACTIVE, d.name())) {
@@ -153,7 +155,7 @@ public class ProjectService {
         BigDecimal committed = view(id).committedUsd();
         if (d.monthlyBudgetUsd() != null && d.monthlyBudgetUsd().compareTo(committed) < 0) {
             // keeps the invariant "month-to-date spend <= budget" true; archive the project to stop it instead
-            throw new ProjectConflictException("Budget $" + d.monthlyBudgetUsd().stripTrailingZeros().toPlainString()
+            throw new ResourceConflictException("Budget $" + d.monthlyBudgetUsd().stripTrailingZeros().toPlainString()
                     + " is below this month's committed spend of $" + committed.toPlainString()
                     + "; choose a higher budget or archive the project");
         }
@@ -179,10 +181,10 @@ public class ProjectService {
     public ProjectView restore(UUID id) {
         Project p = find(id);
         if (!p.isActive() && projects.existsByStatusAndNameIgnoreCase(ProjectStatus.ACTIVE, p.getName())) {
-            throw new ProjectConflictException("An active project is already called '" + p.getName() + "'; rename it first");
+            throw new ResourceConflictException("An active project is already called '" + p.getName() + "'; rename it first");
         }
         if (!p.isActive() && projects.countByStatus(ProjectStatus.ACTIVE) >= MAX_ACTIVE_PROJECTS) {
-            throw new ProjectConflictException("A workspace can have at most " + MAX_ACTIVE_PROJECTS + " active projects");
+            throw new ResourceConflictException("A workspace can have at most " + MAX_ACTIVE_PROJECTS + " active projects");
         }
         p.restore();
         projects.saveAndFlush(p);
@@ -198,7 +200,7 @@ public class ProjectService {
                     or exists (select 1 from llm_request_logs where tenant_id = aethergate.current_tenant_id() and project_id = ?)
                 """, Boolean.class, id, id);
         if (Boolean.TRUE.equals(used)) {
-            throw new ProjectConflictException("Project '" + p.getName()
+            throw new ResourceConflictException("Project '" + p.getName()
                     + "' has billing history and the ledger is append-only; archive it instead");
         }
         List<ApiKey> keys = apiKeys.findAllByOrderByCreatedAtDesc().stream().filter(k -> id.equals(k.getProjectId())).toList();
@@ -243,8 +245,8 @@ public class ProjectService {
         return new ProjectDraft(name, description, budget);
     }
 
-    private static ProjectConflictException duplicate(String name) {
-        return new ProjectConflictException("An active project called '" + name + "' already exists");
+    private static ResourceConflictException duplicate(String name) {
+        return new ResourceConflictException("An active project called '" + name + "' already exists");
     }
 
     private void evict(ApiKey key) {

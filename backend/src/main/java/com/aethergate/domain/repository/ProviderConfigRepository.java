@@ -11,4 +11,9 @@ public interface ProviderConfigRepository extends JpaRepository<ProviderConfig, 
     List<ProviderConfig> findAllByOrderByPriorityOrderAsc();
 
     List<ProviderConfig> findByEnabledTrueOrderByPriorityOrderAsc();
+
+    boolean existsByProviderAndModelNameIgnoreCase(com.aethergate.domain.model.ProviderType provider, String modelName);
+
+    boolean existsByProviderAndModelNameIgnoreCaseAndIdNot(com.aethergate.domain.model.ProviderType provider, String modelName,
+                                                            UUID id);
 }

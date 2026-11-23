@@ -20,7 +20,7 @@ export function ProjectsPage() {
 
   const restore = useAsyncAction(async (p: ProjectView) => {
     await post<ProjectView>(`/api/v1/tenant/projects/${p.id}/restore`)
-    setNotice(`"${p.name}" is active again. Its old keys stay revoked; generate new ones in Keys & Routing.`)
+    setNotice(`"${p.name}" is active again. Its old keys stay revoked; generate new ones in Settings.`)
     list.reload()
   })
 
@@ -320,7 +320,7 @@ function DetailModal({ project, onClose }: { project: ProjectView | null; onClos
                   </li>
                 ))}
               </ul>
-            ) : <p className="text-[13px] text-ink-3">No keys. Generate one in Keys &amp; Routing and pick this project.</p>}
+            ) : <p className="text-[13px] text-ink-3">No keys. Generate one in Settings and pick this project.</p>}
           </section>
           <p className="text-[12px] text-ink-3">
             Created {dateTime(d.project.created_at)} · updated {relative(d.project.updated_at)} · version {d.project.version}

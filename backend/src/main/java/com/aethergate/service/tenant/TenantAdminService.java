@@ -6,12 +6,14 @@ import com.aethergate.config.TenantScoped;
 import com.aethergate.domain.model.ApiKey;
 import com.aethergate.domain.model.Project;
 import com.aethergate.domain.model.ProviderConfig;
+import com.aethergate.domain.model.ProviderType;
 import com.aethergate.domain.repository.ApiKeyRepository;
 import com.aethergate.domain.repository.ProjectRepository;
 import com.aethergate.domain.repository.ProviderConfigRepository;
 import com.aethergate.service.llm.LlmRouterService;
 import com.aethergate.service.llm.RouteTarget;
 import com.aethergate.service.metering.CostCalculator;
+import com.aethergate.service.ResourceConflictException;
 import com.aethergate.service.metering.MeteringLedgerService;
 import com.aethergate.service.project.ProjectArchivedException;
 import com.aethergate.service.ratelimit.RateLimiterService;
@@ -35,6 +37,8 @@ import org.springframework.stereotype.Service;
 public class TenantAdminService {
 
     static final int MAX_ACTIVE_KEYS = 20;
+    static final int MAX_PROVIDERS = 6;
+    static final BigDecimal MAX_PRICE_PER_1M = new BigDecimal("1000");
     static final String PUBLIC_DEMO_PREFIX = "ag_live_demo";
 
     private final ApiKeyRepository apiKeys;
@@ -159,6 +163,85 @@ public class TenantAdminService {
         String requestId = "topup_" + UUID.randomUUID().toString().replace("-", "").substring(0, 20);
         BigDecimal balance = ledger.topUp(requestId, amount, "Manual top-up");
         return new TopUpResult(requestId, CostCalculator.normalize(amount), balance);
+    }
+
+    /** Adds a model at the end of the fallback chain. MOCK_LLM is internal and cannot be added. */
+    @TenantScoped
+    public ProviderView addProvider(String provider, String modelName, BigDecimal inputCost, BigDecimal outputCost) {
+        ProviderType type = providerType(provider);
+        String model = modelName(modelName);
+        validatePrices(inputCost, outputCost);
+        List<ProviderConfig> all = providers.findAllByOrderByPriorityOrderAsc();
+        if (all.size() >= MAX_PROVIDERS) {
+            throw new ResourceConflictException("A fallback chain can have at most " + MAX_PROVIDERS + " models");
+        }
+        if (providers.existsByProviderAndModelNameIgnoreCase(type, model)) {
+            throw new ResourceConflictException(type + " " + model + " is already in the chain");
+        }
+        int priority = all.stream().mapToInt(ProviderConfig::getPriorityOrder).max().orElse(0) + 1;
+        ProviderConfig cfg = providers.saveAndFlush(new ProviderConfig(TenantContext.require(), type, model, priority,
+                CostCalculator.normalize(inputCost), CostCalculator.normalize(outputCost)));
+        return view(cfg);
+    }
+
+    /** Changes model name and prices. Holds already taken keep their price; the next request uses the new one. */
+    @TenantScoped
+    public ProviderView updateProvider(UUID providerId, String modelName, BigDecimal inputCost, BigDecimal outputCost) {
+        ProviderConfig cfg = providers.findById(providerId).orElseThrow(() -> new NoSuchElementException("Provider not found"));
+        String model = modelName(modelName);
+        validatePrices(inputCost, outputCost);
+        if (providers.existsByProviderAndModelNameIgnoreCaseAndIdNot(cfg.getProvider(), model, providerId)) {
+            throw new ResourceConflictException(cfg.getProvider() + " " + model + " is already in the chain");
+        }
+        cfg.reprice(model, CostCalculator.normalize(inputCost), CostCalculator.normalize(outputCost));
+        return view(cfg);
+    }
+
+    /** Removes a model and closes the gap in priorities. The last enabled model can never be removed. */
+    @TenantScoped
+    public void deleteProvider(UUID providerId) {
+        List<ProviderConfig> all = providers.findAllByOrderByPriorityOrderAsc();
+        ProviderConfig target = all.stream().filter(p -> p.getId().equals(providerId)).findFirst()
+                .orElseThrow(() -> new NoSuchElementException("Provider not found"));
+        boolean otherEnabled = all.stream().anyMatch(p -> !p.getId().equals(providerId) && p.isEnabled());
+        if (!otherEnabled) {
+            throw new ResourceConflictException("At least one enabled model must remain in the chain");
+        }
+        providers.delete(target);
+        providers.flush();
+        int priority = 1;
+        for (ProviderConfig p : all) {
+            if (!p.getId().equals(providerId)) {
+                p.setPriorityOrder(priority++); // unique(tenant, priority) is DEFERRABLE
+            }
+        }
+    }
+
+    private static ProviderType providerType(String provider) {
+        try {
+            ProviderType type = ProviderType.valueOf(provider == null ? "" : provider.strip().toUpperCase(java.util.Locale.ROOT));
+            if (type == ProviderType.MOCK_LLM) {
+                throw new IllegalArgumentException("MOCK_LLM is internal");
+            }
+            return type;
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("Provider must be one of OPENAI, ANTHROPIC, GEMINI");
+        }
+    }
+
+    private static String modelName(String modelName) {
+        String m = modelName == null ? "" : modelName.strip();
+        if (!m.matches("[A-Za-z0-9][A-Za-z0-9._:/-]{1,79}")) {
+            throw new IllegalArgumentException("Model name must be 2-80 characters: letters, digits and . _ : / -");
+        }
+        return m;
+    }
+
+    private static void validatePrices(BigDecimal input, BigDecimal output) {
+        if (input == null || output == null || input.signum() < 0 || output.signum() <= 0
+                || input.compareTo(MAX_PRICE_PER_1M) > 0 || output.compareTo(MAX_PRICE_PER_1M) > 0) {
+            throw new IllegalArgumentException("Prices are USD per 1M tokens: input >= 0, output > 0, both at most $1,000");
+        }
     }
 
     /** Enabled providers in priority order, as routing targets. */

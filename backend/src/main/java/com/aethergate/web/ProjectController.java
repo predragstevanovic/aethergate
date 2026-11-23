@@ -59,22 +59,22 @@ public class ProjectController {
     public ResponseEntity<ProjectView> create(@AuthenticationPrincipal Jwt jwt, @Valid @RequestBody ProjectRequest body) {
         ProjectView created = TenantContext.callAs(tenant(jwt), () -> projects.create(draft(body)));
         return ResponseEntity.created(URI.create("/api/v1/tenant/projects/" + created.id()))
-                .eTag(etag(created.version())).body(created);
+                .eTag(IfMatch.etag(created.version())).body(created);
     }
 
     @GetMapping("/{id}")
     public ResponseEntity<ProjectDetail> get(@AuthenticationPrincipal Jwt jwt, @PathVariable UUID id) {
         ProjectDetail detail = TenantContext.callAs(tenant(jwt), () -> projects.get(id));
-        return ResponseEntity.ok().eTag(etag(detail.project().version())).body(detail);
+        return ResponseEntity.ok().eTag(IfMatch.etag(detail.project().version())).body(detail);
     }
 
     @PutMapping("/{id}")
     public ResponseEntity<ProjectView> update(@AuthenticationPrincipal Jwt jwt, @PathVariable UUID id,
                                               @RequestHeader(value = HttpHeaders.IF_MATCH, required = false) String ifMatch,
                                               @Valid @RequestBody ProjectRequest body) {
-        long expected = parseIfMatch(ifMatch);
+        long expected = IfMatch.parse(ifMatch);
         ProjectView updated = TenantContext.callAs(tenant(jwt), () -> projects.update(id, expected, draft(body)));
-        return ResponseEntity.ok().eTag(etag(updated.version())).body(updated);
+        return ResponseEntity.ok().eTag(IfMatch.etag(updated.version())).body(updated);
     }
 
     @PostMapping("/{id}/archive")
@@ -85,7 +85,7 @@ public class ProjectController {
     @PostMapping("/{id}/restore")
     public ResponseEntity<ProjectView> restore(@AuthenticationPrincipal Jwt jwt, @PathVariable UUID id) {
         ProjectView restored = TenantContext.callAs(tenant(jwt), () -> projects.restore(id));
-        return ResponseEntity.ok().eTag(etag(restored.version())).body(restored);
+        return ResponseEntity.ok().eTag(IfMatch.etag(restored.version())).body(restored);
     }
 
     @DeleteMapping("/{id}")
@@ -100,26 +100,5 @@ public class ProjectController {
 
     private static ProjectDraft draft(ProjectRequest body) {
         return new ProjectDraft(body.name(), body.description(), body.monthlyBudgetUsd());
-    }
-
-    static String etag(long version) {
-        return "\"" + version + "\"";
-    }
-
-    /** Accepts {@code "3"}, {@code W/"3"} or a bare {@code 3}. */
-    static long parseIfMatch(String ifMatch) {
-        if (ifMatch == null || ifMatch.isBlank()) {
-            throw new PreconditionRequiredException();
-        }
-        String v = ifMatch.strip();
-        if (v.startsWith("W/")) {
-            v = v.substring(2);
-        }
-        v = v.replace("\"", "");
-        try {
-            return Long.parseLong(v);
-        } catch (NumberFormatException e) {
-            throw new IllegalArgumentException("If-Match must be the ETag returned by the API, e.g. \"3\"");
-        }
     }
 }

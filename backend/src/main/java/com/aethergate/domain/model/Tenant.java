@@ -76,6 +76,12 @@ public class Tenant extends AssignedIdEntity {
         availableBalanceUsd = availableBalanceUsd.add(amount);
     }
 
+    /** Workspace settings. The caller holds the row lock, so this never races a reservation. */
+    public void updateSettings(String newName, BigDecimal newHardBudgetLimit) {
+        this.name = newName;
+        this.hardBudgetLimitUsd = newHardBudgetLimit;
+    }
+
     @Override
     public UUID getId() { return id; }
     public UUID getOwnerUserId() { return ownerUserId; }

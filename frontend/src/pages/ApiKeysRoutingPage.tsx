@@ -1,10 +1,11 @@
-import { ArrowDown, ArrowUp, Check, Copy, Plus, Trash2 } from 'lucide-react'
+import { ArrowDown, ArrowUp, Check, Copy, Pencil, Plus, Trash2 } from 'lucide-react'
 import { useEffect, useState, type FormEvent } from 'react'
 import { Badge, Button, EmptyState, ErrorBanner, Field, Modal, PageHeader, Panel, Skeleton, inputClass } from '../components/ui/primitives'
 import { useAsyncAction, useClipboard } from '../hooks/useInteractions'
 import { useResource } from '../hooks/useResource'
-import { API_BASE, del, get, patch, post, put, type ApiKeyView, type ProjectList, type ProjectView, type ProviderView } from '../lib/api'
-import { dateTime, int, relative, usd } from '../lib/format'
+import { API_BASE, del, get, patch, post, put, type ApiKeyView, type ProjectList, type ProjectView, type ProviderView, type WorkspaceSettings } from '../lib/api'
+import { dateTime, int, relative, usd, usd8 } from '../lib/format'
+import { useAuth } from '../context/AuthContext'
 
 interface CreatedKey {
   key: ApiKeyView
@@ -15,9 +16,10 @@ export function ApiKeysRoutingPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="API keys & routing"
+        title="Workspace, keys & routing"
         description="Keys authenticate the OpenAI-compatible gateway. Only their SHA-256 hash is stored; the raw key is shown once. Routing priority decides which provider serves a request and where it fails over."
       />
+      <WorkspacePanel />
       <KeysPanel />
       <RoutingPanel />
       <QuickstartPanel />
@@ -216,6 +218,13 @@ function RoutingPanel() {
     await patch(`/api/v1/tenant/providers/${p.id}`, { enabled: !p.enabled })
     providers.reload()
   })
+  const [modelForm, setModelForm] = useState<ProviderView | 'new' | null>(null)
+  const [removing, setRemoving] = useState<ProviderView | null>(null)
+  const remove = useAsyncAction(async (p: ProviderView) => {
+    await del(`/api/v1/tenant/providers/${p.id}`)
+    setRemoving(null)
+    providers.reload()
+  })
   const move = (i: number, dir: -1 | 1) => {
     const next = [...order]
     ;[next[i], next[i + dir]] = [next[i + dir], next[i]]
@@ -225,11 +234,14 @@ function RoutingPanel() {
   return (
     <Panel
       title="LLM provider fallback chain"
-      action={dirty && (
+      action={dirty ? (
         <div className="flex gap-2">
           <Button size="sm" variant="ghost" onClick={() => providers.data && setOrder(providers.data)}>Reset</Button>
           <Button size="sm" variant="primary" loading={save.pending} onClick={() => void save.run()}>Save order</Button>
         </div>
+      ) : (
+        <Button size="sm" variant="secondary" icon={<Plus className="size-3.5" />} onClick={() => setModelForm('new')}
+          disabled={order.length >= 6}>Add model</Button>
       )}
     >
       {(providers.error ?? save.error ?? toggle.error) && (
@@ -260,6 +272,8 @@ function RoutingPanel() {
               <div className="flex gap-1">
                 <Button size="sm" variant="ghost" aria-label={`Move ${p.provider} up`} disabled={i === 0} onClick={() => move(i, -1)} icon={<ArrowUp className="size-3.5" />} />
                 <Button size="sm" variant="ghost" aria-label={`Move ${p.provider} down`} disabled={i === order.length - 1} onClick={() => move(i, 1)} icon={<ArrowDown className="size-3.5" />} />
+                <Button size="sm" variant="ghost" aria-label={`Edit ${p.model_name}`} disabled={dirty} onClick={() => setModelForm(p)} icon={<Pencil className="size-3.5" />} />
+                <Button size="sm" variant="ghost" aria-label={`Remove ${p.model_name}`} disabled={dirty} onClick={() => setRemoving(p)} icon={<Trash2 className="size-3.5" />} />
               </div>
             </li>
           ))}
@@ -267,8 +281,122 @@ function RoutingPanel() {
       )}
       <p className="mt-4 text-[12px] text-ink-3">
         Pre-flight holds are priced at the most expensive enabled provider, so a failover can never exceed the reserved budget.
+        A price change applies from the next request; holds already taken keep their price.
       </p>
+      <ModelModal model={modelForm} onClose={() => setModelForm(null)} onSaved={() => { setModelForm(null); providers.reload() }} />
+      <Modal open={removing !== null} title={`Remove ${removing?.model_name ?? ''}`} onClose={() => setRemoving(null)}
+        footer={<><Button variant="ghost" onClick={() => setRemoving(null)}>Cancel</Button><Button variant="danger" loading={remove.pending} onClick={() => removing && void remove.run(removing)}>Remove model</Button></>}>
+        <p className="text-[13px] text-ink-2">The fallback chain closes the gap (priorities are renumbered). The last enabled model can never be removed.</p>
+        {remove.error && <div className="mt-3"><ErrorBanner error={remove.error} compact /></div>}
+      </Modal>
     </Panel>
+  )
+}
+
+function ModelModal({ model, onClose, onSaved }: { model: ProviderView | 'new' | null; onClose: () => void; onSaved: () => void }) {
+  const editing = model !== null && model !== 'new' ? model : null
+  const [provider, setProvider] = useState('GEMINI')
+  const [name, setName] = useState('')
+  const [input, setInput] = useState('')
+  const [output, setOutput] = useState('')
+  const [touched, setTouched] = useState(false)
+  const save = useAsyncAction(async () => {
+    const body = { provider, model_name: name.trim(), input_cost_per1m: input, output_cost_per1m: output }
+    if (editing) await put(`/api/v1/tenant/providers/${editing.id}`, body)
+    else await post('/api/v1/tenant/providers', body)
+    onSaved()
+  })
+  useEffect(() => {
+    if (model === null) return
+    setProvider(editing?.provider ?? 'GEMINI')
+    setName(editing?.model_name ?? '')
+    setInput(editing ? String(Number(editing.input_cost_per1m)) : '')
+    setOutput(editing ? String(Number(editing.output_cost_per1m)) : '')
+    setTouched(false)
+    save.clearError()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [model])
+  const nameError = touched && !/^[A-Za-z0-9][A-Za-z0-9._:/-]{1,79}$/.test(name.trim()) ? 'Letters, digits and . _ : / - (2–80)' : null
+  const inError = touched && !(Number(input) >= 0 && input.trim() !== '' && Number(input) <= 1000) ? '0 – 1,000' : null
+  const outError = touched && !(Number(output) > 0 && Number(output) <= 1000) ? 'More than 0, up to 1,000' : null
+  const submit = (e: FormEvent) => {
+    e.preventDefault()
+    setTouched(true)
+    const ok = /^[A-Za-z0-9][A-Za-z0-9._:/-]{1,79}$/.test(name.trim()) && input.trim() !== '' && Number(input) >= 0
+      && Number(input) <= 1000 && Number(output) > 0 && Number(output) <= 1000
+    if (ok) void save.run()
+  }
+  return (
+    <Modal open={model !== null} title={editing ? `Edit ${editing.model_name}` : 'Add model to the fallback chain'} onClose={onClose}
+      footer={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" type="submit" form="model-form" loading={save.pending}>{editing ? 'Save' : 'Add model'}</Button></>}>
+      <form id="model-form" onSubmit={submit} className="space-y-4" noValidate>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Provider" htmlFor="model-provider" hint={editing ? 'Fixed for an existing model' : 'Without its API key, the simulator serves it'}>
+            <select id="model-provider" className={inputClass} value={provider} disabled={Boolean(editing)} onChange={(e) => setProvider(e.target.value)}>
+              <option value="OPENAI">OpenAI</option>
+              <option value="ANTHROPIC">Anthropic</option>
+              <option value="GEMINI">Google Gemini</option>
+            </select>
+          </Field>
+          <Field label="Model" htmlFor="model-name" error={nameError}>
+            <input id="model-name" className={`${inputClass} font-mono`} placeholder="gemini-2.5-flash" value={name} aria-invalid={Boolean(nameError)} onChange={(e) => setName(e.target.value)} />
+          </Field>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Input $ / 1M tokens" htmlFor="model-in" error={inError}>
+            <input id="model-in" inputMode="decimal" className={`${inputClass} font-mono num`} value={input} aria-invalid={Boolean(inError)} onChange={(e) => setInput(e.target.value.replace(/[^\d.]/g, ''))} />
+          </Field>
+          <Field label="Output $ / 1M tokens" htmlFor="model-out" error={outError}>
+            <input id="model-out" inputMode="decimal" className={`${inputClass} font-mono num`} value={output} aria-invalid={Boolean(outError)} onChange={(e) => setOutput(e.target.value.replace(/[^\d.]/g, ''))} />
+          </Field>
+        </div>
+        <p className="text-[12px] text-ink-3">New models join at the end of the chain; reorder them below. Holds are priced at the most expensive enabled model.</p>
+        {save.error && <ErrorBanner error={save.error} compact />}
+      </form>
+    </Modal>
+  )
+}
+
+function WorkspacePanel() {
+  const settings = useResource(() => get<WorkspaceSettings>('/api/v1/tenant/settings'), [])
+  const s = settings.data
+  const [saved, setSaved] = useState(false)
+  return (
+    <Panel title="Workspace">
+      {settings.error && <ErrorBanner error={settings.error} onRetry={settings.reload} compact />}
+      {/* keyed by the saved values: the form re-initialises from props after every save, no effect needed */}
+      {!s ? <Skeleton className="h-24" /> : <WorkspaceForm key={`${s.name}|${s.hard_budget_limit_usd}`} s={s}
+        onEdit={() => setSaved(false)} onSaved={() => { setSaved(true); settings.reload() }} />}
+      {saved && <p role="status" className="mt-3 text-[12px] text-good">Saved. The new limit applies to the very next request.</p>}
+    </Panel>
+  )
+}
+
+function WorkspaceForm({ s, onSaved, onEdit }: { s: WorkspaceSettings; onSaved: () => void; onEdit: () => void }) {
+  const { refreshMe } = useAuth()
+  const [name, setName] = useState(s.name)
+  const [limit, setLimit] = useState(String(Number(s.hard_budget_limit_usd)))
+  const save = useAsyncAction(async () => {
+    await put('/api/v1/tenant/settings', { name: name.trim(), hard_budget_limit_usd: limit })
+    await refreshMe()
+    onSaved()
+  })
+  const dirty = name.trim() !== s.name || Number(limit) !== Number(s.hard_budget_limit_usd)
+  return (
+    <>
+      <form className="grid gap-4 md:grid-cols-[1fr_220px_auto] md:items-end" onSubmit={(e) => { e.preventDefault(); onEdit(); void save.run() }}>
+        <Field label="Name" htmlFor="ws-name" hint={`Slug ${s.slug} · plan ${s.plan_tier}`}>
+          <input id="ws-name" className={inputClass} value={name} maxLength={120} disabled={s.demo} onChange={(e) => { setName(e.target.value); onEdit() }} />
+        </Field>
+        <Field label="Monthly hard limit (USD)" htmlFor="ws-limit" hint={`Committed this month: ${usd8(s.committed_usd)}`}>
+          <input id="ws-limit" inputMode="decimal" className={`${inputClass} font-mono num`} value={limit} disabled={s.demo}
+            onChange={(e) => { setLimit(e.target.value.replace(/[^\d.]/g, '')); onEdit() }} />
+        </Field>
+        <Button type="submit" variant="primary" disabled={s.demo || !dirty} loading={save.pending}>Save</Button>
+      </form>
+      {s.demo && <p className="mt-3 text-[12px] text-ink-3">The shared demo workspace is read-only here. Sign in as Helix or Nimbus to rename a workspace or change its limit.</p>}
+      {save.error && <div className="mt-3"><ErrorBanner error={save.error} compact /></div>}
+    </>
   )
 }
 

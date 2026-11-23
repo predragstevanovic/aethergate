@@ -135,7 +135,7 @@ sequenceDiagram
 2. **Playground & Chaos:** pošalji prompt, pa isti ponovo (keš HIT ⚡). Zatim uključi *Simulate provider failure*,
    pa breaker prelazi u OPEN i dolazi do failover-a.
 3. **Ledger Audit:** filtriraj po `request_id` i pokaži tri stavke istog zahteva.
-4. **API Keys & Routing:** prevuci provajdere da promeniš prioritet, napravi ključ sa malim RPM-om, pa ga opozovi.
+4. **Settings (ključevi i rutiranje):** prevuci provajdere da promeniš prioritet, napravi ključ sa malim RPM-om, pa ga opozovi.
 
 ---
 

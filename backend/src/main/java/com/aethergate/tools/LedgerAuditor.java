@@ -131,7 +131,7 @@ public class LedgerAuditor {
             jdbc.execute("set local role " + TenantAspect.APP_ROLE);
             long total = 0;
             for (String table : List.of("ledger_entries", "llm_request_logs", "semantic_cache", "api_keys", "provider_configs",
-                    "rate_limit_windows", "projects")) {
+                    "rate_limit_windows", "projects", "guardrail_rules", "guardrail_events")) {
                 total += jdbc.queryForObject("select count(*) from " + table + " where tenant_id <> ?", Long.class, a);
             }
             total += jdbc.queryForObject("select count(*) from tenants where id <> ?", Long.class, a);

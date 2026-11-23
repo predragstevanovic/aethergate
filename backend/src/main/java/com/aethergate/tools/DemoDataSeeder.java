@@ -58,6 +58,21 @@ public class DemoDataSeeder {
         }
     }
 
+    /** A guardrail rule and the share of requests that triggered it (BLOCKed ones never reached the ledger). */
+    private record GuardrailSeed(String name, String type, String pattern, String action, double rate) {}
+
+    private static final Map<UUID, List<GuardrailSeed>> GUARDRAILS = Map.of(
+            VORTEX, List.of(
+                    new GuardrailSeed("Secrets in prompts", "REGEX", "(?i)(api[_-]?key|password|secret)\\s*[:=]\\s*\\S+",
+                            "BLOCK", 0.004),
+                    new GuardrailSeed("Customer e-mails", "PII_EMAIL", null, "REDACT", 0.03)),
+            HELIX, List.of(
+                    new GuardrailSeed("Unreleased hardware", "KEYWORDS", "Project Atlas, prototype X9", "BLOCK", 0.006)),
+            NIMBUS, List.of(
+                    new GuardrailSeed("Patient e-mails", "PII_EMAIL", null, "REDACT", 0.05),
+                    new GuardrailSeed("Medical record numbers", "REGEX", "\\bMRN-\\d{6}\\b", "REDACT", 0.04),
+                    new GuardrailSeed("Payment cards", "PII_CARD", null, "BLOCK", 0.005)));
+
     private static final List<String> VORTEX_PROMPTS = List.of(
             "Summarize this support ticket and suggest a reply",
             "Classify the sentiment of this customer review",
@@ -277,9 +292,11 @@ public class DemoDataSeeder {
         jdbc.update("update tenants set available_balance_usd = ?, reserved_balance_usd = 0 where id = ?", available, t);
 
         int cached = warmCache(t, plan, lastSeen, lastCost, lastTokens, now);
+        int guardrailHits = seedGuardrails(t, times, rnd);
         return String.format("%-16s %5d requests | %4d cache hits | %3d failovers | %d projects, %d budget 402s"
+                        + " | %d guardrail hits"
                         + " | spend $%s | saved $%s | balance $%s | %d cached prompts",
-                plan.label(), logs.size(), hits, failovers, plan.projects().size(), budgetRejections,
+                plan.label(), logs.size(), hits, failovers, plan.projects().size(), budgetRejections, guardrailHits,
                 CostCalculator.normalize(spend).toPlainString(), CostCalculator.normalize(saved).toPlainString(),
                 available.toPlainString(), cached);
     }
@@ -317,6 +334,8 @@ public class DemoDataSeeder {
         jdbc.execute("alter table ledger_entries disable trigger trg_ledger_entries_append_only");
         jdbc.update("delete from ledger_entries where tenant_id = ?", t);
         jdbc.execute("alter table ledger_entries enable trigger trg_ledger_entries_append_only");
+        jdbc.update("delete from guardrail_events where tenant_id = ?", t);
+        jdbc.update("delete from guardrail_rules where tenant_id = ?", t);
         jdbc.update("update api_keys set project_id = null where tenant_id = ?", t);
         jdbc.update("delete from projects where tenant_id = ?", t);
         jdbc.update("delete from provider_configs where tenant_id = ?", t);
@@ -345,6 +364,34 @@ public class DemoDataSeeder {
         }
         out.sort(null);
         return out;
+    }
+
+    /** Rules created before the month started, and an event for each request that (would have) triggered one. */
+    private int seedGuardrails(UUID t, List<Instant> times, Random rnd) {
+        int hits = 0;
+        Instant created = times.getFirst().minus(Duration.ofDays(3));
+        for (GuardrailSeed g : GUARDRAILS.getOrDefault(t, List.of())) {
+            UUID ruleId = UUID.nameUUIDFromBytes((t + ":guardrail:" + g.name()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            jdbc.update("""
+                    insert into guardrail_rules (id, tenant_id, name, rule_type, pattern, action, created_at, updated_at)
+                    values (?, ?, ?, ?, ?, ?, ?, ?)""", ruleId, t, g.name(), g.type(), g.pattern(), g.action(),
+                    Timestamp.from(created), Timestamp.from(created));
+            List<Object[]> events = new ArrayList<>();
+            for (int i = 0; i < times.size(); i++) {
+                if (rnd.nextDouble() < g.rate()) {
+                    String requestId = "BLOCK".equals(g.action())
+                            ? "req_blocked_" + t.toString().substring(0, 4) + "_" + i // never reached the ledger
+                            : "req_seed_" + t.toString().substring(0, 4) + "_" + i;
+                    events.add(new Object[]{t, ruleId, g.name(), g.action(), requestId, 1 + rnd.nextInt(2),
+                            Timestamp.from(times.get(i))});
+                }
+            }
+            jdbc.batchUpdate("""
+                    insert into guardrail_events (tenant_id, rule_id, rule_name, action, request_id, matches, created_at)
+                    values (?, ?, ?, ?, ?, ?, ?)""", events);
+            hits += events.size();
+        }
+        return hits;
     }
 
     private void insertProjects(Plan plan, Instant start, Instant now) {
