@@ -28,4 +28,23 @@ public interface LedgerEntryRepository extends JpaRepository<LedgerEntry, UUID> 
             where e.tenantId = :tenantId and e.entryType = :type and e.createdAt >= :since
             """)
     BigDecimal sumSince(@Param("tenantId") UUID tenantId, @Param("type") EntryType type, @Param("since") Instant since);
+
+    @Query("""
+            select coalesce(sum(e.amountUsd), 0) from LedgerEntry e
+            where e.tenantId = :tenantId and e.projectId = :projectId and e.entryType = :type and e.createdAt >= :since
+            """)
+    BigDecimal sumProjectSince(@Param("tenantId") UUID tenantId, @Param("projectId") UUID projectId,
+                               @Param("type") EntryType type, @Param("since") Instant since);
+
+    /** Holds of the project that are still in flight: a RESERVE with no SETTLE/RELEASE for its request yet. */
+    @Query("""
+            select coalesce(sum(r.amountUsd), 0) from LedgerEntry r
+            where r.tenantId = :tenantId and r.projectId = :projectId
+              and r.entryType = com.aethergate.domain.model.EntryType.RESERVE
+              and not exists (select 1 from LedgerEntry c
+                              where c.tenantId = r.tenantId and c.requestId = r.requestId
+                                and c.entryType in (com.aethergate.domain.model.EntryType.SETTLE,
+                                                    com.aethergate.domain.model.EntryType.RELEASE))
+            """)
+    BigDecimal openProjectHolds(@Param("tenantId") UUID tenantId, @Param("projectId") UUID projectId);
 }

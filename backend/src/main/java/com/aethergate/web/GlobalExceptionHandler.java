@@ -1,5 +1,11 @@
 package com.aethergate.web;
 
+import com.aethergate.service.metering.ProjectBudgetExceededException;
+import com.aethergate.service.project.ProjectArchivedException;
+import com.aethergate.service.project.ProjectConflictException;
+import com.aethergate.service.project.StaleVersionException;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import com.aethergate.service.auth.DemoUnavailableException;
 import com.aethergate.service.llm.AllProvidersFailedException;
 import com.aethergate.service.llm.StreamInterruptedException;
@@ -39,6 +45,50 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         p.setProperty("hard_budget_limit_usd", e.getLimit());
         p.setProperty("projected_usd", e.getProjected());
         return p;
+    }
+
+    @ExceptionHandler(ProjectBudgetExceededException.class)
+    ProblemDetail projectBudget(ProjectBudgetExceededException e, HttpServletRequest req) {
+        ProblemDetail p = problem(HttpStatus.PAYMENT_REQUIRED, "project-budget-exceeded", e.getMessage(), req);
+        p.setProperty("project", e.getProjectName());
+        p.setProperty("monthly_budget_usd", e.getBudget());
+        p.setProperty("projected_usd", e.getProjected());
+        return p;
+    }
+
+    @ExceptionHandler(ProjectArchivedException.class)
+    ProblemDetail projectArchived(ProjectArchivedException e, HttpServletRequest req) {
+        return problem(HttpStatus.CONFLICT, "project-archived", e.getMessage(), req);
+    }
+
+    @ExceptionHandler(ProjectConflictException.class)
+    ProblemDetail conflict(ProjectConflictException e, HttpServletRequest req) {
+        return problem(HttpStatus.CONFLICT, "conflict", e.getMessage(), req);
+    }
+
+    /** Unique-index races (two tabs creating the same project name at once) end here, not in a 500. */
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    ProblemDetail integrity(DataIntegrityViolationException e, HttpServletRequest req) {
+        log.info("Integrity violation on {} {}: {}", req.getMethod(), req.getRequestURI(), e.getMostSpecificCause().getMessage());
+        return problem(HttpStatus.CONFLICT, "conflict", "The change conflicts with existing data; reload and retry", req);
+    }
+
+    @ExceptionHandler(StaleVersionException.class)
+    ProblemDetail stale(StaleVersionException e, HttpServletRequest req) {
+        ProblemDetail p = problem(HttpStatus.PRECONDITION_FAILED, "stale-version", e.getMessage(), req);
+        p.setProperty("current_version", e.getCurrentVersion());
+        return p;
+    }
+
+    /** Two writers passed the version check at the same instant: JPA @Version rejects the loser at commit. */
+    @ExceptionHandler(ObjectOptimisticLockingFailureException.class)
+    ProblemDetail optimisticLock(ObjectOptimisticLockingFailureException e, HttpServletRequest req) {
+        return problem(HttpStatus.PRECONDITION_FAILED, "stale-version", "The resource was modified concurrently; reload and retry", req);
+    }
+
+    @ExceptionHandler(PreconditionRequiredException.class)
+    ProblemDetail preconditionRequired(PreconditionRequiredException e, HttpServletRequest req) {
+        return problem(HttpStatus.PRECONDITION_REQUIRED, "precondition-required", e.getMessage(), req);
     }
 
     @ExceptionHandler(RateLimitExceededException.class)

@@ -106,7 +106,8 @@ public class GatewayOrchestratorService {
                 .max(BigDecimal::compareTo)
                 .orElseThrow();
         Reservation reservation = TenantContext.callAs(tenantId, () -> ledger.reserveBudget(requestId, hold,
-                "Pre-flight hold: " + promptTokens + " prompt + " + maxTokens + " max completion tokens"));
+                "Pre-flight hold: " + promptTokens + " prompt + " + maxTokens + " max completion tokens",
+                principal.projectId()));
         return new LiveExecution(requestId, principal, usage, cmd, chain, reservation, maxTokens, cacheModel, cacheKey, start);
     }
 
@@ -179,7 +180,7 @@ public class GatewayOrchestratorService {
             int latency = (int) (clockMillis.getAsLong() - start);
             BigDecimal saved = hit.originalCostUsd() == null ? ZERO : hit.originalCostUsd();
             TenantContext.runAs(principal.tenantId(), () -> requestLogs.record(new LlmRequestLog(principal.tenantId(),
-                    requestId, principal.apiKeyId(), "CACHE", hit.modelName(), promptTokens, hit.completionTokens(),
+                    requestId, principal.apiKeyId(), principal.projectId(), "CACHE", hit.modelName(), promptTokens, hit.completionTokens(),
                     ZERO, saved, latency, timing.ttftMs(), "HIT", false, 200)));
             log.info("cache HIT request={} similarity={} saved=${}", requestId, String.format("%.4f", hit.similarity()), saved);
             return new CompletionOutcome(requestId, "HIT", "CACHE", hit.modelName(), false, promptTokens,
@@ -245,7 +246,7 @@ public class GatewayOrchestratorService {
                 TenantContext.runAs(tenantId, () -> ledger.releaseReservation(requestId, "All providers unavailable"));
                 int latency = (int) (clockMillis.getAsLong() - start);
                 TenantContext.runAs(tenantId, () -> requestLogs.record(new LlmRequestLog(tenantId, requestId,
-                        principal.apiKeyId(), "NONE", chain.getFirst().model(), TokenEstimator.countPrompt(cmd.messages()), 0,
+                        principal.apiKeyId(), principal.projectId(), "NONE", chain.getFirst().model(), TokenEstimator.countPrompt(cmd.messages()), 0,
                         ZERO, ZERO, latency, latency, "MISS", true, 503)));
                 throw e;
             } finally {
@@ -263,7 +264,7 @@ public class GatewayOrchestratorService {
                     target.model() + ": " + result.promptTokens() + " in / " + result.completionTokens() + " out tokens"));
             int latency = (int) (clockMillis.getAsLong() - start);
             TenantContext.runAs(tenantId, () -> requestLogs.record(new LlmRequestLog(tenantId, requestId, principal.apiKeyId(),
-                    target.provider().name(), target.model(), result.promptTokens(), result.completionTokens(),
+                    principal.projectId(), target.provider().name(), target.model(), result.promptTokens(), result.completionTokens(),
                     settlement.settledUsd(), ZERO, latency, timing.ttftMs(), "MISS", failover, status)));
             rateLimiter.recordCompletion(principal.limits(), result.completionTokens());
             log.info("settled request={} provider={} cost=${} released=${} failover={}", requestId, target.provider(),

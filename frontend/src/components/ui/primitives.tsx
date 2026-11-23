@@ -131,12 +131,13 @@ export function Segmented<T extends string>({ value, options, onChange, label }:
   )
 }
 
-export function Modal({ open, title, onClose, children, footer }: {
+export function Modal({ open, title, onClose, children, footer, wide }: {
   open: boolean
   title: string
   onClose: () => void
   children: ReactNode
   footer?: ReactNode
+  wide?: boolean
 }) {
   const ref = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -150,7 +151,7 @@ export function Modal({ open, title, onClose, children, footer }: {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/50 backdrop-blur-[2px]" onClick={onClose} aria-hidden />
-      <div ref={ref} role="dialog" aria-modal="true" aria-label={title} className="relative w-full max-w-md rounded-lg border border-line bg-panel shadow-2xl">
+      <div ref={ref} role="dialog" aria-modal="true" aria-label={title} className={`relative w-full ${wide ? 'max-w-2xl' : 'max-w-md'} max-h-[90vh] overflow-y-auto rounded-lg border border-line bg-panel shadow-2xl`}>
         <header className="flex items-center justify-between border-b border-line px-5 h-12">
           <h2 className="text-sm font-medium">{title}</h2>
           <button type="button" onClick={onClose} aria-label="Close dialog" className="text-ink-3 hover:text-ink">

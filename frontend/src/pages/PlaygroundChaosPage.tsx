@@ -2,7 +2,7 @@ import { Repeat, Send, ServerCrash, Square } from 'lucide-react'
 import { useCallback, useRef, useState } from 'react'
 import { Badge, Button, CircuitPill, ErrorBanner, PageHeader, Panel, Skeleton, inputClass } from '../components/ui/primitives'
 import { useResource } from '../hooks/useResource'
-import { ApiError, get, streamPlayground, type Overview, type Telemetry } from '../lib/api'
+import { ApiError, get, streamPlayground, type Overview, type ProjectList, type Telemetry } from '../lib/api'
 import { int, ms, usd8 } from '../lib/format'
 
 const SUGGESTIONS = [
@@ -24,6 +24,9 @@ export function PlaygroundChaosPage() {
   const [history, setHistory] = useState<Telemetry[]>([])
   const abort = useRef<AbortController | null>(null)
   const health = useResource(() => get<Overview>('/api/v1/dashboard/overview?range=24h'), [])
+  const projectList = useResource(() => get<ProjectList>('/api/v1/tenant/projects'), [])
+  const activeProjects = (projectList.data?.projects ?? []).filter((p) => p.status === 'ACTIVE')
+  const [projectId, setProjectId] = useState('')
 
   const run = useCallback(async (mode: Mode) => {
     const text = (mode === 'resend' ? lastPrompt : prompt)?.trim()
@@ -35,7 +38,7 @@ export function PlaygroundChaosPage() {
     setError(null)
     setLastPrompt(text)
     await streamPlayground(
-      { prompt: text, max_tokens: 400, simulate_failure: mode === 'chaos' },
+      { prompt: text, max_tokens: 400, simulate_failure: mode === 'chaos', project_id: projectId || null },
       {
         onDelta: (d) => setOutput((o) => o + d),
         onTelemetry: (t) => {
@@ -48,7 +51,7 @@ export function PlaygroundChaosPage() {
     )
     setStreaming(null)
     health.reload()
-  }, [prompt, lastPrompt, streaming, health])
+  }, [prompt, lastPrompt, streaming, health, projectId])
 
   const providers = health.data?.providers ?? []
   const primary = providers.find((p) => p.enabled)
@@ -66,7 +69,14 @@ export function PlaygroundChaosPage() {
           <CircuitPill key={p.provider + p.priority_order} provider={p.provider} state={p.circuit_state}
             primary={p === primary} enabled={p.enabled} live={p.live} />
         ))}
-        <span className="ml-auto text-[12px] text-ink-3">Breaker opens after 4 failed calls · cools down 30 s</span>
+        <label className="ml-auto flex items-center gap-2 text-[12px] text-ink-3">
+          Charge to
+          <select aria-label="Project to charge" className={`${inputClass} h-8 w-48 text-[13px]`} value={projectId} onChange={(e) => setProjectId(e.target.value)}>
+            <option value="">Unassigned</option>
+            {activeProjects.map((p) => <option key={p.id} value={p.id}>{p.name}{p.monthly_budget_usd ? ` (${Math.round((p.budget_utilization ?? 0) * 100)}% of budget)` : ''}</option>)}
+          </select>
+        </label>
+        <span className="text-[12px] text-ink-3">Breaker: 4 failures · 30 s cool-down</span>
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[1fr_340px]">

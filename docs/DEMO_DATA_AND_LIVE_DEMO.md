@@ -33,6 +33,7 @@ flowchart LR
 | Keš HIT-ova (realno ~20%) | ~300 | ~190 | (vidi izlaz seed-a) |
 | Failover-a (~3%) i ispada oba provajdera (~0,4%) | ✔ | ✔ | ✔ |
 | Dopune kredita | $100 početno + $50 karticom | $100 | $100 |
+| Projekti (cost centri) | Support Copilot $5 · Docs Search $1,50 · Growth Experiments bez limita · Legacy Chatbot *arhiviran* | Fleet Telemetry $2 · Maintenance Assistant $0,80 | Patient Messaging $0,25 · Clinical Coding $0,12 · Research Sandbox |
 
 ### Zašto podaci izgledaju *stvarno*, a ne nasumično
 
@@ -49,13 +50,16 @@ flowchart LR
 - **Ista pravila kao produkcija:** seed rezerviše po najskupljem provajderu u lancu, pa naplaćuje i vraća ostatak.
   Svaki zahtev u ledger-u ima tačno `RESERVE = SETTLE + RELEASE`.
 - **Deterministički:** `Random` ima fiksni seed po tenantu, pa svaki put nastaju isti brojevi.
+- **Budžeti projekata:** seed ih poštuje isto kao gateway. Zahtev koji bi prešao budžet se preskače, jer bi gateway
+  vratio 402. Zato su neki projekti blizu limita (npr. Docs Search ~99%), a nijedan nije preko.
+- **Arhiviran projekat:** "Legacy Chatbot" dobija saobraćaj samo prvih ~35% meseca, pa se arhivira; posle toga nema hold-ova.
 - **Topli keš:** promptovi iz poslednjih 24h ostaju u semantičkom kešu, pa ih Playground odmah vraća kao HIT.
 
 ### Bezbednost: šta seed briše
 
 Seed briše i ponovo puni **samo tri seed tenanta** (Vortex, Helix, Nimbus), po fiksnim UUID-ovima, u jednoj transakciji.
 Pravi tenanti i drugi projekti u istoj bazi se ne diraju. Na kraju se automatski pokreće
-**audit od 10 provera**, na primer:
+**audit od 13 provera**, na primer:
 - da li je ledger izbalansiran;
 - da li se saldo poklapa sa zbirom stavki;
 - da li RLS skriva tuđe redove.

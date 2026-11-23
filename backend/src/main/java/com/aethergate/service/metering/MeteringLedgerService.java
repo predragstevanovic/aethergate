@@ -4,15 +4,19 @@ import com.aethergate.config.TenantContext;
 import com.aethergate.config.TenantScoped;
 import com.aethergate.domain.model.EntryType;
 import com.aethergate.domain.model.LedgerEntry;
+import com.aethergate.domain.model.Project;
 import com.aethergate.domain.model.Tenant;
 import com.aethergate.domain.repository.LedgerEntryRepository;
+import com.aethergate.domain.repository.ProjectRepository;
 import com.aethergate.domain.repository.TenantRepository;
+import com.aethergate.service.project.ProjectArchivedException;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.UUID;
 import org.slf4j.Logger;
@@ -26,6 +30,10 @@ import org.springframework.stereotype.Service;
  * {@code SELECT ... FOR UPDATE} on the tenant row, so concurrent requests of one tenant are
  * serialised exactly where it matters (the balance) and nowhere else. Every operation is
  * idempotent on {@code (tenant_id, request_id, entry_type)}: a retry replays the stored outcome.
+ *
+ * <p>Budgets are hierarchical: a hold must fit the tenant balance, the tenant's monthly hard limit
+ * AND, when the caller's key belongs to a project, that project's monthly budget. Because all of
+ * it is checked under the same tenant row lock, concurrent requests can never overshoot either level.
  */
 @Service
 public class MeteringLedgerService {
@@ -34,16 +42,23 @@ public class MeteringLedgerService {
 
     private final TenantRepository tenants;
     private final LedgerEntryRepository ledger;
+    private final ProjectRepository projects;
     private final Clock clock;
 
-    public MeteringLedgerService(TenantRepository tenants, LedgerEntryRepository ledger, Clock clock) {
+    public MeteringLedgerService(TenantRepository tenants, LedgerEntryRepository ledger, ProjectRepository projects, Clock clock) {
         this.tenants = tenants;
         this.ledger = ledger;
+        this.projects = projects;
         this.clock = clock;
     }
 
     @TenantScoped
     public Reservation reserveBudget(String requestId, BigDecimal estimatedMaxCost, String description) {
+        return reserveBudget(requestId, estimatedMaxCost, description, null);
+    }
+
+    @TenantScoped
+    public Reservation reserveBudget(String requestId, BigDecimal estimatedMaxCost, String description, UUID projectId) {
         BigDecimal amount = requirePositive(estimatedMaxCost);
         UUID tenantId = TenantContext.require();
         Tenant tenant = lock(tenantId);
@@ -61,9 +76,13 @@ public class MeteringLedgerService {
         if (projected.compareTo(tenant.getHardBudgetLimitUsd()) > 0) {
             throw new BudgetLimitExceededException(tenant.getHardBudgetLimitUsd(), CostCalculator.normalize(projected));
         }
+        if (projectId != null) {
+            checkProjectBudget(tenantId, projectId, amount);
+        }
 
         tenant.reserve(amount);
-        ledger.save(new LedgerEntry(tenantId, requestId, EntryType.RESERVE, amount, tenant.getAvailableBalanceUsd(), description));
+        ledger.save(new LedgerEntry(tenantId, requestId, EntryType.RESERVE, amount, tenant.getAvailableBalanceUsd(),
+                description, projectId));
         return new Reservation(requestId, amount, tenant.getAvailableBalanceUsd(), false);
     }
 
@@ -92,9 +111,10 @@ public class MeteringLedgerService {
 
         BigDecimal availableBeforeRelease = tenant.getAvailableBalanceUsd();
         tenant.clearReservation(reserved, released);
-        ledger.save(new LedgerEntry(tenantId, requestId, EntryType.SETTLE, settled, availableBeforeRelease, description));
+        UUID projectId = reserve.getProjectId(); // SETTLE/RELEASE are charged to the project that took the hold
+        ledger.save(new LedgerEntry(tenantId, requestId, EntryType.SETTLE, settled, availableBeforeRelease, description, projectId));
         ledger.save(new LedgerEntry(tenantId, requestId, EntryType.RELEASE, released, tenant.getAvailableBalanceUsd(),
-                "Unused hold returned"));
+                "Unused hold returned", projectId));
         return new Settlement(requestId, reserved, settled, released, tenant.getAvailableBalanceUsd(), false);
     }
 
@@ -111,7 +131,8 @@ public class MeteringLedgerService {
         }
         BigDecimal reserved = reserve.getAmountUsd();
         tenant.clearReservation(reserved, reserved);
-        ledger.save(new LedgerEntry(tenantId, requestId, EntryType.RELEASE, reserved, tenant.getAvailableBalanceUsd(), reason));
+        ledger.save(new LedgerEntry(tenantId, requestId, EntryType.RELEASE, reserved, tenant.getAvailableBalanceUsd(), reason,
+                reserve.getProjectId()));
         return new Settlement(requestId, reserved, BigDecimal.ZERO.setScale(CostCalculator.SCALE), reserved,
                 tenant.getAvailableBalanceUsd(), false);
     }
@@ -127,6 +148,24 @@ public class MeteringLedgerService {
         tenant.credit(credit);
         ledger.save(new LedgerEntry(tenantId, requestId, EntryType.TOP_UP, credit, tenant.getAvailableBalanceUsd(), description));
         return tenant.getAvailableBalanceUsd();
+    }
+
+    /** Runs under the tenant row lock taken by the caller, so concurrent holds are serialised here too. */
+    private void checkProjectBudget(UUID tenantId, UUID projectId, BigDecimal amount) {
+        Project project = projects.findById(projectId).orElseThrow(() -> new NoSuchElementException("Project not found"));
+        if (!project.isActive()) {
+            throw new ProjectArchivedException(project.getName());
+        }
+        BigDecimal budget = project.getMonthlyBudgetUsd();
+        if (budget == null) {
+            return;
+        }
+        BigDecimal projected = ledger.sumProjectSince(tenantId, projectId, EntryType.SETTLE, monthStart())
+                .add(ledger.openProjectHolds(tenantId, projectId))
+                .add(amount);
+        if (projected.compareTo(budget) > 0) {
+            throw new ProjectBudgetExceededException(project.getName(), budget, CostCalculator.normalize(projected));
+        }
     }
 
     private Tenant lock(UUID tenantId) {

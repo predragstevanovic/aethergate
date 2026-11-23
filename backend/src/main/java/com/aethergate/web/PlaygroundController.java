@@ -1,5 +1,7 @@
 package com.aethergate.web;
 
+import com.aethergate.service.project.ProjectService;
+import com.aethergate.config.TenantContext;
 import com.aethergate.config.AetherGateProperties;
 import com.aethergate.service.CompletionCommand;
 import com.aethergate.service.GatewayExecution;
@@ -32,9 +34,11 @@ public class PlaygroundController {
     private final GatewayOrchestratorService orchestrator;
     private final CompletionResponder responder;
     private final AetherGateProperties.RateLimit limits;
+    private final ProjectService projects;
 
     public PlaygroundController(CurrentTenant currentTenant, GatewayOrchestratorService orchestrator,
-                                CompletionResponder responder, AetherGateProperties properties) {
+                                CompletionResponder responder, AetherGateProperties properties, ProjectService projects) {
+        this.projects = projects;
         this.currentTenant = currentTenant;
         this.orchestrator = orchestrator;
         this.responder = responder;
@@ -44,7 +48,11 @@ public class PlaygroundController {
     @PostMapping("/completions")
     public ResponseEntity<StreamingResponseBody> complete(@AuthenticationPrincipal Jwt jwt, @Valid @RequestBody PlaygroundRequest body) {
         TenantRef tenant = currentTenant.of(jwt);
-        GatewayPrincipal principal = GatewayPrincipal.forPlayground(tenant.id(), tenant.name(), limits.playgroundRpm(), limits.playgroundTpm());
+        if (body.projectId() != null) { // charge the run to a cost centre: it must be an active project of this tenant
+            TenantContext.runAs(tenant.id(), () -> projects.ensureActive(body.projectId()));
+        }
+        GatewayPrincipal principal = GatewayPrincipal.forPlayground(tenant.id(), tenant.name(), limits.playgroundRpm(),
+                limits.playgroundTpm(), body.projectId());
         List<ChatMessage> messages = new ArrayList<>();
         if (body.system() != null && !body.system().isBlank()) {
             messages.add(new ChatMessage("system", body.system()));

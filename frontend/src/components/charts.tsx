@@ -1,5 +1,5 @@
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import type { SeriesPoint } from '../lib/api'
+import type { DailyUsage, SeriesPoint } from '../lib/api'
 import { bucketLabel, tokens, usd8, usdSmart } from '../lib/format'
 
 const AXIS = { fontSize: 11, fill: 'var(--ink-3)' }
@@ -100,6 +100,37 @@ export function BurnChart({ series, range }: { series: SeriesPoint[]; range: str
             }
           />
           <Bar dataKey="cost" fill="var(--series-1)" radius={[4, 4, 0, 0]} maxBarSize={18} isAnimationActive={false} />
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
+
+const dayLabel = (iso: string) => new Date(iso + 'T00:00:00Z').toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })
+
+/** One project's daily spend over 30 days (single series: no legend box, the panel title names it). */
+export function DailySpendChart({ days }: { days: DailyUsage[] }) {
+  const data = days.map((d) => ({ ...d, cost: Number(d.cost_usd) }))
+  return (
+    <div className="h-40" role="img" aria-label={`Daily spend over the last 30 days, ${days.length} active days`}>
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: 0 }} barCategoryGap={2}>
+          <CartesianGrid stroke="var(--grid)" vertical={false} />
+          <XAxis dataKey="day" tickFormatter={dayLabel} tick={AXIS} axisLine={false} tickLine={false} minTickGap={24} />
+          <YAxis tickFormatter={axisUsd} tick={AXIS} axisLine={false} tickLine={false} width={44} />
+          <Tooltip
+            cursor={{ fill: 'var(--panel-2)' }}
+            content={({ active, payload, label }) =>
+              active && payload?.length ? (
+                <TooltipCard title={dayLabel(String(label))} rows={[
+                  { name: 'Spend', color: 'var(--series-1)', value: usd8(String(payload[0]?.payload.cost_usd)) },
+                  { name: 'Requests', color: 'var(--ink-3)', value: String(payload[0]?.payload.requests) },
+                  { name: 'Cache hits', color: 'var(--ink-3)', value: String(payload[0]?.payload.cache_hits) },
+                ]} />
+              ) : null
+            }
+          />
+          <Bar dataKey="cost" fill="var(--series-1)" radius={[4, 4, 0, 0]} maxBarSize={14} isAnimationActive={false} />
         </BarChart>
       </ResponsiveContainer>
     </div>

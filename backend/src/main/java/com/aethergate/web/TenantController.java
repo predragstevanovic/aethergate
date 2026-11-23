@@ -7,6 +7,7 @@ import com.aethergate.service.tenant.AdminViews.ProviderView;
 import com.aethergate.service.tenant.AdminViews.TopUpResult;
 import com.aethergate.service.tenant.TenantAdminService;
 import com.aethergate.service.tenant.TenantRef;
+import com.aethergate.web.dto.AssignKeyProjectRequest;
 import com.aethergate.web.dto.CreateApiKeyRequest;
 import com.aethergate.web.dto.ReorderProvidersRequest;
 import com.aethergate.web.dto.ToggleProviderRequest;
@@ -52,7 +53,12 @@ public class TenantController {
         TenantRef tenant = currentTenant.of(jwt);
         return TenantContext.callAs(tenant.id(), () -> admin.createKey(body.name(),
                 body.rateLimitRpm() == null ? 60 : body.rateLimitRpm(),
-                body.rateLimitTpm() == null ? 100_000 : body.rateLimitTpm()));
+                body.rateLimitTpm() == null ? 100_000 : body.rateLimitTpm(), body.projectId()));
+    }
+
+    @PatchMapping("/api-keys/{id}")
+    public ApiKeyView assignKey(@AuthenticationPrincipal Jwt jwt, @PathVariable UUID id, @RequestBody AssignKeyProjectRequest body) {
+        return TenantContext.callAs(currentTenant.of(jwt).id(), () -> admin.assignKeyToProject(id, body.projectId()));
     }
 
     @DeleteMapping("/api-keys/{id}")

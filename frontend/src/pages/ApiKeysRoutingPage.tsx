@@ -3,7 +3,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { Badge, Button, EmptyState, ErrorBanner, Field, Modal, PageHeader, Panel, Skeleton, inputClass } from '../components/ui/primitives'
 import { useAsyncAction, useClipboard } from '../hooks/useInteractions'
 import { useResource } from '../hooks/useResource'
-import { API_BASE, del, get, patch, post, put, type ApiKeyView, type ProviderView } from '../lib/api'
+import { API_BASE, del, get, patch, post, put, type ApiKeyView, type ProjectList, type ProjectView, type ProviderView } from '../lib/api'
 import { dateTime, int, relative, usd } from '../lib/format'
 
 interface CreatedKey {
@@ -27,6 +27,13 @@ export function ApiKeysRoutingPage() {
 
 function KeysPanel() {
   const keys = useResource(() => get<ApiKeyView[]>('/api/v1/tenant/api-keys'), [])
+  const projectList = useResource(() => get<ProjectList>('/api/v1/tenant/projects'), [])
+  const projects = projectList.data?.projects ?? []
+  const activeProjects = projects.filter((p) => p.status === 'ACTIVE')
+  const move = useAsyncAction(async (k: ApiKeyView, projectId: string) => {
+    await patch(`/api/v1/tenant/api-keys/${k.id}`, { project_id: projectId || null })
+    keys.reload()
+  })
   const [creating, setCreating] = useState(false)
   const [created, setCreated] = useState<CreatedKey | null>(null)
   const [confirmRevoke, setConfirmRevoke] = useState<ApiKeyView | null>(null)
@@ -43,6 +50,7 @@ function KeysPanel() {
       action={<Button size="sm" variant="primary" icon={<Plus className="size-3.5" />} onClick={() => setCreating(true)}>Generate key</Button>}
     >
       {keys.error && <div className="p-5"><ErrorBanner error={keys.error} onRetry={keys.reload} /></div>}
+      {move.error && <div className="p-5 pb-0"><ErrorBanner error={move.error} compact /></div>}
       {keys.loading ? (
         <div className="p-5 space-y-2">{Array.from({ length: 3 }, (_, i) => <Skeleton key={i} className="h-9" />)}</div>
       ) : !keys.data?.length ? (
@@ -54,6 +62,7 @@ function KeysPanel() {
               <tr className="text-left text-[12px] text-ink-3 border-b border-line">
                 <th className="font-normal px-5 h-9">Name</th>
                 <th className="font-normal px-3">Key</th>
+                <th className="font-normal px-3">Project</th>
                 <th className="font-normal px-3 text-right">Limits</th>
                 <th className="font-normal px-3">Created</th>
                 <th className="font-normal px-3">Status</th>
@@ -65,6 +74,17 @@ function KeysPanel() {
                 <tr key={k.id} className={`border-b border-line last:border-0 ${k.active ? '' : 'opacity-55'}`}>
                   <td className="px-5 h-11">{k.name}</td>
                   <td className="px-3 font-mono text-ink-2">{k.key_prefix}••••••••</td>
+                  <td className="px-3">
+                    {k.active ? (
+                      <select aria-label={`Project of ${k.name}`} className={`${inputClass} h-8 w-44 text-[13px]`} value={k.project_id ?? ''}
+                        disabled={move.pending} onChange={(e) => void move.run(k, e.target.value)}>
+                        <option value="">Unassigned</option>
+                        {activeProjects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                      </select>
+                    ) : (
+                      <span className="text-ink-3">{projects.find((p) => p.id === k.project_id)?.name ?? 'Unassigned'}</span>
+                    )}
+                  </td>
                   <td className="px-3 text-right font-mono num text-ink-2 whitespace-nowrap">{int(k.rate_limit_rpm)} rpm · {int(k.rate_limit_tpm)} tpm</td>
                   <td className="px-3 text-ink-3 whitespace-nowrap" title={dateTime(k.created_at)}>{relative(k.created_at)}</td>
                   <td className="px-3">{k.active ? <Badge tone="good" dot>Active</Badge> : <Badge>Revoked</Badge>}</td>
@@ -84,7 +104,7 @@ function KeysPanel() {
         </div>
       )}
 
-      <CreateKeyModal open={creating} onClose={() => setCreating(false)} onCreated={(c) => { setCreating(false); setCreated(c); keys.reload() }} />
+      <CreateKeyModal projects={activeProjects} open={creating} onClose={() => setCreating(false)} onCreated={(c) => { setCreating(false); setCreated(c); keys.reload() }} />
       <RevealKeyModal created={created} onClose={() => setCreated(null)} />
       <Modal
         open={confirmRevoke !== null}
@@ -106,13 +126,21 @@ function KeysPanel() {
   )
 }
 
-function CreateKeyModal({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: (c: CreatedKey) => void }) {
+function CreateKeyModal({ open, onClose, onCreated, projects }: {
+  open: boolean
+  onClose: () => void
+  onCreated: (c: CreatedKey) => void
+  projects: ProjectView[]
+}) {
   const [name, setName] = useState('')
+  const [projectId, setProjectId] = useState('')
   const [rpm, setRpm] = useState('60')
   const [tpm, setTpm] = useState('100000')
   const [touched, setTouched] = useState(false)
   const create = useAsyncAction(async () => {
-    const c = await post<CreatedKey>('/api/v1/tenant/api-keys', { name: name.trim(), rate_limit_rpm: Number(rpm), rate_limit_tpm: Number(tpm) })
+    const c = await post<CreatedKey>('/api/v1/tenant/api-keys', {
+      name: name.trim(), rate_limit_rpm: Number(rpm), rate_limit_tpm: Number(tpm), project_id: projectId || null,
+    })
     setName('')
     setTouched(false)
     onCreated(c)
@@ -136,6 +164,12 @@ function CreateKeyModal({ open, onClose, onCreated }: { open: boolean; onClose: 
       <form id="create-key" onSubmit={submit} className="space-y-4" noValidate>
         <Field label="Name" htmlFor="key-name" error={nameError} hint="e.g. Production backend">
           <input id="key-name" className={inputClass} value={name} maxLength={100} aria-invalid={Boolean(nameError)} onChange={(e) => setName(e.target.value)} />
+        </Field>
+        <Field label="Project" htmlFor="key-project" hint="Spend is charged to this project and limited by its monthly budget">
+          <select id="key-project" className={inputClass} value={projectId} onChange={(e) => setProjectId(e.target.value)}>
+            <option value="">Unassigned</option>
+            {projects.map((p) => <option key={p.id} value={p.id}>{p.name}{p.monthly_budget_usd ? ` · ${usd(p.monthly_budget_usd)}/mo` : ''}</option>)}
+          </select>
         </Field>
         <div className="grid grid-cols-2 gap-3">
           <Field label="Requests / min" htmlFor="key-rpm" error={rpmError}>

@@ -10,6 +10,7 @@ import { LoginPage } from './pages/LoginPage'
 const OverviewPage = lazy(() => import('./pages/OverviewPage').then((m) => ({ default: m.OverviewPage })))
 const PlaygroundChaosPage = lazy(() => import('./pages/PlaygroundChaosPage').then((m) => ({ default: m.PlaygroundChaosPage })))
 const LedgerAuditPage = lazy(() => import('./pages/LedgerAuditPage').then((m) => ({ default: m.LedgerAuditPage })))
+const ProjectsPage = lazy(() => import('./pages/ProjectsPage').then((m) => ({ default: m.ProjectsPage })))
 const ApiKeysRoutingPage = lazy(() => import('./pages/ApiKeysRoutingPage').then((m) => ({ default: m.ApiKeysRoutingPage })))
 
 function PageFallback() {
@@ -52,6 +53,7 @@ const router = createBrowserRouter([
           { path: '/', element: page(<OverviewPage />) },
           { path: '/playground', element: page(<PlaygroundChaosPage />) },
           { path: '/ledger', element: page(<LedgerAuditPage />) },
+          { path: '/projects', element: page(<ProjectsPage />) },
           { path: '/settings', element: page(<ApiKeysRoutingPage />) },
         ],
       },

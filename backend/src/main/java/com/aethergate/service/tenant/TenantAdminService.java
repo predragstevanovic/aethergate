@@ -4,13 +4,16 @@ import com.aethergate.config.AetherGateProperties;
 import com.aethergate.config.TenantContext;
 import com.aethergate.config.TenantScoped;
 import com.aethergate.domain.model.ApiKey;
+import com.aethergate.domain.model.Project;
 import com.aethergate.domain.model.ProviderConfig;
 import com.aethergate.domain.repository.ApiKeyRepository;
+import com.aethergate.domain.repository.ProjectRepository;
 import com.aethergate.domain.repository.ProviderConfigRepository;
 import com.aethergate.service.llm.LlmRouterService;
 import com.aethergate.service.llm.RouteTarget;
 import com.aethergate.service.metering.CostCalculator;
 import com.aethergate.service.metering.MeteringLedgerService;
+import com.aethergate.service.project.ProjectArchivedException;
 import com.aethergate.service.ratelimit.RateLimiterService;
 import com.aethergate.service.tenant.AdminViews.ApiKeyView;
 import com.aethergate.service.tenant.AdminViews.CreatedApiKey;
@@ -36,17 +39,20 @@ public class TenantAdminService {
 
     private final ApiKeyRepository apiKeys;
     private final ProviderConfigRepository providers;
+    private final ProjectRepository projects;
     private final MeteringLedgerService ledger;
     private final TenantDirectoryService directory;
     private final RateLimiterService rateLimiter;
     private final LlmRouterService router;
     private final BigDecimal maxTopUp;
 
-    public TenantAdminService(ApiKeyRepository apiKeys, ProviderConfigRepository providers, MeteringLedgerService ledger,
-                              TenantDirectoryService directory, RateLimiterService rateLimiter, LlmRouterService router,
-                              AetherGateProperties properties) {
+    @SuppressWarnings("java:S107")
+    public TenantAdminService(ApiKeyRepository apiKeys, ProviderConfigRepository providers, ProjectRepository projects,
+                              MeteringLedgerService ledger, TenantDirectoryService directory, RateLimiterService rateLimiter,
+                              LlmRouterService router, AetherGateProperties properties) {
         this.apiKeys = apiKeys;
         this.providers = providers;
+        this.projects = projects;
         this.ledger = ledger;
         this.directory = directory;
         this.rateLimiter = rateLimiter;
@@ -61,12 +67,22 @@ public class TenantAdminService {
 
     @TenantScoped
     public CreatedApiKey createKey(String name, int rpm, int tpm) {
+        return createKey(name, rpm, tpm, null);
+    }
+
+    /** {@code projectId}: optional cost centre; it must be an ACTIVE project of this tenant (RLS makes others invisible). */
+    @TenantScoped
+    public CreatedApiKey createKey(String name, int rpm, int tpm, UUID projectId) {
         long active = apiKeys.findAllByOrderByCreatedAtDesc().stream().filter(ApiKey::isActive).count();
         if (active >= MAX_ACTIVE_KEYS) {
             throw new IllegalArgumentException("A workspace can have at most " + MAX_ACTIVE_KEYS + " active keys");
         }
         String raw = ApiKeys.generate();
-        ApiKey key = apiKeys.save(new ApiKey(TenantContext.require(), name.strip(), ApiKeys.displayPrefix(raw), ApiKeys.sha256Hex(raw), rpm, tpm));
+        if (projectId != null) {
+            requireActiveProject(projectId);
+        }
+        ApiKey key = apiKeys.save(new ApiKey(TenantContext.require(), name.strip(), ApiKeys.displayPrefix(raw),
+                ApiKeys.sha256Hex(raw), rpm, tpm, projectId));
         return new CreatedApiKey(view(key), raw);
     }
 
@@ -80,6 +96,28 @@ public class TenantAdminService {
         directory.evictKey(key.getKeyHash());
         rateLimiter.invalidate(key.getId());
         return view(key);
+    }
+
+    /** Moves an active key to another project ({@code null} = unassigned). Spend history stays where it was charged. */
+    @TenantScoped
+    public ApiKeyView assignKeyToProject(UUID keyId, UUID projectId) {
+        ApiKey key = apiKeys.findById(keyId).orElseThrow(() -> new NoSuchElementException("API key not found"));
+        if (!key.isActive()) {
+            throw new IllegalArgumentException("A revoked key cannot be reassigned");
+        }
+        if (projectId != null) {
+            requireActiveProject(projectId);
+        }
+        key.assignProject(projectId);
+        directory.evictKey(key.getKeyHash()); // the cached principal carries the old project
+        return view(key);
+    }
+
+    private void requireActiveProject(UUID projectId) {
+        Project project = projects.findById(projectId).orElseThrow(() -> new NoSuchElementException("Project not found"));
+        if (!project.isActive()) {
+            throw new ProjectArchivedException(project.getName());
+        }
     }
 
     @TenantScoped(readOnly = true)
@@ -134,7 +172,7 @@ public class TenantAdminService {
 
     private static ApiKeyView view(ApiKey k) {
         return new ApiKeyView(k.getId(), k.getName(), k.getKeyPrefix(), k.getRateLimitRpm(), k.getRateLimitTpm(),
-                k.isActive(), k.getLastUsedAt(), k.getCreatedAt());
+                k.isActive(), k.getLastUsedAt(), k.getCreatedAt(), k.getProjectId());
     }
 
     private ProviderView view(ProviderConfig p) {

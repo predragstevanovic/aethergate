@@ -10,7 +10,7 @@ public final class AdminViews {
     private AdminViews() {}
 
     public record ApiKeyView(UUID id, String name, String keyPrefix, int rateLimitRpm, int rateLimitTpm, boolean active,
-                             Instant lastUsedAt, Instant createdAt) {}
+                             Instant lastUsedAt, Instant createdAt, UUID projectId) {}
 
     /** Returned exactly once, at creation: the raw key is never stored or shown again. */
     public record CreatedApiKey(ApiKeyView key, String rawKey) {}

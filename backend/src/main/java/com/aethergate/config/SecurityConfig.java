@@ -131,8 +131,8 @@ public class SecurityConfig {
         // patterns, so local dev servers on any port (Vite falls back to 5174, 5175, ...) are accepted
         cfg.setAllowedOriginPatterns(props.cors().allowedOrigins().stream().map(String::trim).filter(s -> !s.isEmpty()).distinct().toList());
         cfg.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
-        cfg.setAllowedHeaders(List.of("Authorization", "Content-Type", "X-Simulate-Provider-Failure"));
-        cfg.setExposedHeaders(List.of("X-Request-Id", "X-Cache", "Retry-After"));
+        cfg.setAllowedHeaders(List.of("Authorization", "Content-Type", "X-Simulate-Provider-Failure", "If-Match"));
+        cfg.setExposedHeaders(List.of("X-Request-Id", "X-Cache", "Retry-After", "ETag", "Location"));
         cfg.setMaxAge(3600L);
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/**", cfg);

@@ -23,7 +23,8 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
- * Generates 30 days of realistic, internally consistent history for the two demo tenants:
+ * Generates 30 days of realistic, internally consistent history for the three seeded tenants and their
+ * projects (cost centres, one archived mid-month, budgets respected exactly as the gateway enforces them):
  * business-hour traffic with weekday peaks and growth, repeated prompts that become semantic
  * cache HITs, occasional failovers and outages, card top-ups, and a warm cache for the
  * playground. Every money movement obeys the ledger invariants, which {@link LedgerAuditor}
@@ -44,7 +45,18 @@ public class DemoDataSeeder {
     private record Model(String provider, String name, BigDecimal in, BigDecimal out) {}
 
     private record Plan(UUID tenant, String label, int requests, Model primary, Model fallback, List<String> prompts,
-                        int minPrompt, int maxPrompt, int maxTokens, List<BigDecimal> topUps) {}
+                        int minPrompt, int maxPrompt, int maxTokens, List<BigDecimal> topUps, List<ProjectSeed> projects) {}
+
+    /**
+     * A cost centre: {@code weight} = share of traffic (the rest is unassigned), {@code budget} = monthly cap the
+     * seeder respects exactly like the gateway (a request that would cross it is dropped, as a 402 would),
+     * {@code activeUntil} = fraction of the 30 days after which the project is archived (1.0 = still active).
+     */
+    private record ProjectSeed(String name, String description, BigDecimal budget, int weight, double activeUntil) {
+        UUID id(UUID tenant) {
+            return UUID.nameUUIDFromBytes((tenant + ":" + name).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
 
     private static final List<String> VORTEX_PROMPTS = List.of(
             "Summarize this support ticket and suggest a reply",
@@ -106,15 +118,33 @@ public class DemoDataSeeder {
                 new Plan(VORTEX, "Vortex AI Labs", 1450,
                         new Model("OPENAI", "gpt-4o", new BigDecimal("2.50"), new BigDecimal("10.00")),
                         new Model("ANTHROPIC", "claude-sonnet-4-5", new BigDecimal("3.00"), new BigDecimal("15.00")),
-                        VORTEX_PROMPTS, 350, 2600, 1024, List.of(new BigDecimal("100"), new BigDecimal("50"))),
+                        VORTEX_PROMPTS, 350, 2600, 1024, List.of(new BigDecimal("100"), new BigDecimal("50")),
+                        List.of(new ProjectSeed("Support Copilot", "Drafts replies and summaries for the support inbox",
+                                        new BigDecimal("5.00"), 42, 1.0),
+                                new ProjectSeed("Docs Search", "Answers questions over the public knowledge base",
+                                        new BigDecimal("1.50"), 24, 1.0),
+                                new ProjectSeed("Growth Experiments", "Marketing copy and A/B subject lines (no cap)",
+                                        null, 14, 1.0),
+                                new ProjectSeed("Legacy Chatbot", "Old website widget, replaced by Support Copilot",
+                                        new BigDecimal("3.00"), 8, 0.35))),
                 new Plan(HELIX, "Helix Robotics", 900,
                         new Model("ANTHROPIC", "claude-haiku-4-5", new BigDecimal("1.00"), new BigDecimal("5.00")),
                         new Model("GEMINI", "gemini-2.5-flash", new BigDecimal("0.30"), new BigDecimal("2.50")),
-                        HELIX_PROMPTS, 600, 4200, 1024, List.of(new BigDecimal("100"))),
+                        HELIX_PROMPTS, 600, 4200, 1024, List.of(new BigDecimal("100")),
+                        List.of(new ProjectSeed("Fleet Telemetry", "Nightly anomaly summaries for 40 warehouse robots",
+                                        new BigDecimal("2.00"), 48, 1.0),
+                                new ProjectSeed("Maintenance Assistant", "Technician Q&A on error codes and checklists",
+                                        new BigDecimal("0.80"), 34, 1.0))),
                 new Plan(NIMBUS, "Nimbus Health", 1200,
                         new Model("OPENAI", "gpt-4o-mini", new BigDecimal("0.15"), new BigDecimal("0.60")),
                         new Model("GEMINI", "gemini-2.5-flash", new BigDecimal("0.30"), new BigDecimal("2.50")),
-                        NIMBUS_PROMPTS, 250, 1800, 800, List.of(new BigDecimal("100"))));
+                        NIMBUS_PROMPTS, 250, 1800, 800, List.of(new BigDecimal("100")),
+                        List.of(new ProjectSeed("Patient Messaging", "Plain-language summaries and appointment reminders",
+                                        new BigDecimal("0.25"), 44, 1.0),
+                                new ProjectSeed("Clinical Coding", "ICD-10 candidate suggestions for human coders",
+                                        new BigDecimal("0.12"), 30, 1.0),
+                                new ProjectSeed("Research Sandbox", "Exploratory prompts by the data team (no cap)",
+                                        null, 12, 1.0))));
         List<String> report = new ArrayList<>();
         for (Plan plan : plans) {
             report.add(tx.execute(s -> seedTenant(plan, now)));
@@ -129,6 +159,10 @@ public class DemoDataSeeder {
         Instant start = now.minus(Duration.ofDays(30));
 
         List<Instant> times = trafficTimes(plan.requests(), start, now, rnd);
+        insertProjects(plan, start, now);
+        Instant monthStart = now.atZone(ZoneOffset.UTC).withDayOfMonth(1).truncatedTo(ChronoUnit.DAYS).toInstant();
+        Map<UUID, BigDecimal> projectMtd = new HashMap<>();
+        int budgetRejections = 0;
         List<Object[]> ledger = new ArrayList<>();
         List<Object[]> logs = new ArrayList<>();
         Map<String, Instant> lastSeen = new HashMap<>();
@@ -146,7 +180,8 @@ public class DemoDataSeeder {
         // initial credit, then a card top-up when the balance runs low
         available = available.add(plan.topUps().getFirst());
         topUpTotal = topUpTotal.add(plan.topUps().getFirst());
-        ledger.add(row(t, "topup_initial_credit", "TOP_UP", plan.topUps().getFirst(), available, "Initial credit", start.minusSeconds(3600)));
+        ledger.add(row(t, "topup_initial_credit", "TOP_UP", plan.topUps().getFirst(), available, "Initial credit",
+                start.minusSeconds(3600), null));
         topUpIndex++;
 
         for (int i = 0; i < times.size(); i++) {
@@ -156,8 +191,11 @@ public class DemoDataSeeder {
                 BigDecimal amount = plan.topUps().get(topUpIndex++);
                 available = available.add(amount);
                 topUpTotal = topUpTotal.add(amount);
-                ledger.add(row(t, "topup_card_" + topUpIndex, "TOP_UP", amount, available, "Card top-up", at.minusSeconds(120)));
+                ledger.add(row(t, "topup_card_" + topUpIndex, "TOP_UP", amount, available, "Card top-up", at.minusSeconds(120), null));
             }
+            double progress = (double) Duration.between(start, at).toSeconds() / Duration.between(start, now).toSeconds();
+            ProjectSeed project = pickProject(plan.projects(), progress, rnd); // by time: archived projects get no later traffic
+            UUID projectId = project == null ? null : project.id(t);
             String prompt = pickPrompt(plan.prompts(), rnd);
             if (rnd.nextDouble() < 0.6) {
                 prompt = prompt + " (ref #" + (10_000 + rnd.nextInt(90_000)) + ")"; // one-off context: never cacheable
@@ -172,7 +210,7 @@ public class DemoDataSeeder {
                 BigDecimal original = lastCost.get(prompt);
                 saved = saved.add(original);
                 int ttft = 4 + rnd.nextInt(14);
-                logs.add(log(t, requestId, "CACHE", plan.primary().name(), promptTokens, lastTokens.get(prompt),
+                logs.add(log(t, requestId, projectId, "CACHE", plan.primary().name(), promptTokens, lastTokens.get(prompt),
                         BigDecimal.ZERO, original, ttft + rnd.nextInt(10), ttft, "HIT", false, 200, at));
                 continue;
             }
@@ -183,15 +221,21 @@ public class DemoDataSeeder {
             if (available.compareTo(hold) < 0) {
                 continue; // would have been a 402 — the seed keeps the demo account healthy instead
             }
+            if (project != null && project.budget() != null && !at.isBefore(monthStart)
+                    && projectMtd.getOrDefault(projectId, BigDecimal.ZERO).add(hold).compareTo(project.budget()) > 0) {
+                budgetRejections++;
+                continue; // the gateway would answer 402 project-budget-exceeded: nothing is written
+            }
             available = available.subtract(hold);
             ledger.add(row(t, requestId, "RESERVE", hold, available, "Pre-flight hold: " + promptTokens + " prompt + "
-                    + plan.maxTokens() + " max completion tokens", at));
+                    + plan.maxTokens() + " max completion tokens", at, projectId));
 
             double roll = rnd.nextDouble();
             if (roll < 0.004) { // outage of both providers: whole hold released
                 available = available.add(hold);
-                ledger.add(row(t, requestId, "RELEASE", hold, available, "All providers unavailable", at.plusMillis(900)));
-                logs.add(log(t, requestId, "NONE", plan.primary().name(), promptTokens, 0, BigDecimal.ZERO, BigDecimal.ZERO,
+                ledger.add(row(t, requestId, "RELEASE", hold, available, "All providers unavailable", at.plusMillis(900),
+                        projectId));
+                logs.add(log(t, requestId, projectId, "NONE", plan.primary().name(), promptTokens, 0, BigDecimal.ZERO, BigDecimal.ZERO,
                         900, 900, "MISS", true, 503, at));
                 continue;
             }
@@ -204,10 +248,13 @@ public class DemoDataSeeder {
             Instant done = at.plusMillis(latency);
             BigDecimal release = hold.subtract(cost);
             ledger.add(row(t, requestId, "SETTLE", cost, available, used.name() + ": " + promptTokens + " in / " + completion
-                    + " out tokens", done));
+                    + " out tokens", done, projectId));
             available = available.add(release);
-            ledger.add(row(t, requestId, "RELEASE", release, available, "Unused hold returned", done));
-            logs.add(log(t, requestId, used.provider(), used.name(), promptTokens, completion, cost, BigDecimal.ZERO,
+            ledger.add(row(t, requestId, "RELEASE", release, available, "Unused hold returned", done, projectId));
+            if (projectId != null && !done.isBefore(monthStart)) {
+                projectMtd.merge(projectId, cost, BigDecimal::add);
+            }
+            logs.add(log(t, requestId, projectId, used.provider(), used.name(), promptTokens, completion, cost, BigDecimal.ZERO,
                     latency, ttft, "MISS", failover, 200, at));
             spend = spend.add(cost);
             if (failover) {
@@ -219,18 +266,22 @@ public class DemoDataSeeder {
         }
 
         jdbc.batchUpdate("""
-                insert into ledger_entries (id, tenant_id, request_id, entry_type, amount_usd, balance_after_usd, description, created_at)
-                values (?, ?, ?, ?, ?, ?, ?, ?)""", ledger);
+                insert into ledger_entries (id, tenant_id, request_id, entry_type, amount_usd, balance_after_usd, description,
+                                            created_at, project_id)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?)""", ledger);
         jdbc.batchUpdate("""
-                insert into llm_request_logs (id, tenant_id, request_id, provider_used, model_used, prompt_tokens, completion_tokens,
-                    total_cost_usd, saved_cost_usd, latency_ms, ttft_ms, cache_status, failover_triggered, status_code, created_at)
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", logs);
+                insert into llm_request_logs (id, tenant_id, request_id, project_id, provider_used, model_used, prompt_tokens,
+                    completion_tokens, total_cost_usd, saved_cost_usd, latency_ms, ttft_ms, cache_status, failover_triggered,
+                    status_code, created_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", logs);
         jdbc.update("update tenants set available_balance_usd = ?, reserved_balance_usd = 0 where id = ?", available, t);
 
         int cached = warmCache(t, plan, lastSeen, lastCost, lastTokens, now);
-        return String.format("%-16s %5d requests | %4d cache hits | %3d failovers | spend $%s | saved $%s | balance $%s | %d cached prompts",
-                plan.label(), logs.size(), hits, failovers, CostCalculator.normalize(spend).toPlainString(),
-                CostCalculator.normalize(saved).toPlainString(), available.toPlainString(), cached);
+        return String.format("%-16s %5d requests | %4d cache hits | %3d failovers | %d projects, %d budget 402s"
+                        + " | spend $%s | saved $%s | balance $%s | %d cached prompts",
+                plan.label(), logs.size(), hits, failovers, plan.projects().size(), budgetRejections,
+                CostCalculator.normalize(spend).toPlainString(), CostCalculator.normalize(saved).toPlainString(),
+                available.toPlainString(), cached);
     }
 
     /** Playground prompts answered in the last 24h stay in the semantic cache (same text the simulator produces). */
@@ -266,6 +317,8 @@ public class DemoDataSeeder {
         jdbc.execute("alter table ledger_entries disable trigger trg_ledger_entries_append_only");
         jdbc.update("delete from ledger_entries where tenant_id = ?", t);
         jdbc.execute("alter table ledger_entries enable trigger trg_ledger_entries_append_only");
+        jdbc.update("update api_keys set project_id = null where tenant_id = ?", t);
+        jdbc.update("delete from projects where tenant_id = ?", t);
         jdbc.update("delete from provider_configs where tenant_id = ?", t);
         jdbc.update("""
                 insert into provider_configs (tenant_id, provider, model_name, priority_order, input_cost_per_1m, output_cost_per_1m)
@@ -294,23 +347,54 @@ public class DemoDataSeeder {
         return out;
     }
 
+    private void insertProjects(Plan plan, Instant start, Instant now) {
+        long span = Duration.between(start, now).toSeconds();
+        for (ProjectSeed p : plan.projects()) {
+            boolean archived = p.activeUntil() < 1.0;
+            Instant created = start.minus(Duration.ofDays(2));
+            Instant archivedAt = archived ? start.plusSeconds((long) (span * p.activeUntil()) + 3600) : null;
+            jdbc.update("""
+                    insert into projects (id, tenant_id, name, description, monthly_budget_usd, status, created_at, updated_at,
+                                          archived_at)
+                    values (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    p.id(plan.tenant()), plan.tenant(), p.name(), p.description(),
+                    p.budget() == null ? null : CostCalculator.normalize(p.budget()), archived ? "ARCHIVED" : "ACTIVE",
+                    Timestamp.from(created), Timestamp.from(archived ? archivedAt : created),
+                    archivedAt == null ? null : Timestamp.from(archivedAt));
+        }
+    }
+
+    /** Weighted pick among projects still active at this point of the month; leftover weight = unassigned key. */
+    private static ProjectSeed pickProject(List<ProjectSeed> projects, double progress, Random rnd) {
+        int roll = rnd.nextInt(100);
+        int acc = 0;
+        for (ProjectSeed p : projects) {
+            acc += p.weight();
+            if (roll < acc) {
+                return progress <= p.activeUntil() ? p : null;
+            }
+        }
+        return null;
+    }
+
     /** Zipf-like: a few prompts are asked constantly (which is what makes caching pay off). */
     private static String pickPrompt(List<String> prompts, Random rnd) {
         int idx = (int) Math.floor(Math.pow(rnd.nextDouble(), 2.2) * prompts.size());
         return prompts.get(Math.min(idx, prompts.size() - 1));
     }
 
+    @SuppressWarnings("java:S107")
     private static Object[] row(UUID tenant, String requestId, String type, BigDecimal amount, BigDecimal after,
-                                String description, Instant at) {
+                                String description, Instant at, UUID project) {
         return new Object[]{UUID.randomUUID(), tenant, requestId, type, CostCalculator.normalize(amount),
-                CostCalculator.normalize(after), description, Timestamp.from(at)};
+                CostCalculator.normalize(after), description, Timestamp.from(at), project};
     }
 
     @SuppressWarnings("java:S107")
-    private static Object[] log(UUID tenant, String requestId, String provider, String model, int prompt, int completion,
-                                BigDecimal cost, BigDecimal saved, int latency, int ttft, String cache, boolean failover,
-                                int status, Instant at) {
-        return new Object[]{UUID.randomUUID(), tenant, requestId, provider, model, prompt, completion,
+    private static Object[] log(UUID tenant, String requestId, UUID project, String provider, String model, int prompt,
+                                int completion, BigDecimal cost, BigDecimal saved, int latency, int ttft, String cache,
+                                boolean failover, int status, Instant at) {
+        return new Object[]{UUID.randomUUID(), tenant, requestId, project, provider, model, prompt, completion,
                 CostCalculator.normalize(cost), CostCalculator.normalize(saved), latency, ttft, cache, failover, status,
                 Timestamp.from(at)};
     }

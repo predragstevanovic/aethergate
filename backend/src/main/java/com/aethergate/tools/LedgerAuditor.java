@@ -68,6 +68,30 @@ public class LedgerAuditor {
                 "select count(*) from tenants where available_balance_usd < 0 or reserved_balance_usd < 0", Integer.class);
         checks.add(new Check("No negative balances", negative == 0, negative + " tenants below zero"));
 
+        Integer splitProjects = jdbc.queryForObject("""
+                select count(*) from (
+                  select tenant_id, request_id from ledger_entries where entry_type in ('RESERVE','SETTLE','RELEASE')
+                  group by tenant_id, request_id
+                  having count(distinct coalesce(project_id::text, '-')) > 1) x""", Integer.class);
+        checks.add(new Check("Projects: RESERVE, SETTLE and RELEASE of a request hit the same project", splitProjects == 0,
+                splitProjects + " requests split across projects"));
+
+        Integer overBudget = jdbc.queryForObject("""
+                select count(*) from projects p
+                where p.monthly_budget_usd is not null
+                  and (select coalesce(sum(e.amount_usd), 0) from ledger_entries e
+                       where e.tenant_id = p.tenant_id and e.project_id = p.id and e.entry_type = 'SETTLE'
+                         and e.created_at >= date_trunc('month', now() at time zone 'UTC') at time zone 'UTC')
+                      > p.monthly_budget_usd""", Integer.class);
+        checks.add(new Check("Projects: month-to-date spend within every project budget", overBudget == 0,
+                overBudget + " projects over budget"));
+
+        Integer afterArchive = jdbc.queryForObject("""
+                select count(*) from ledger_entries e join projects p on p.tenant_id = e.tenant_id and p.id = e.project_id
+                where p.archived_at is not null and e.entry_type = 'RESERVE' and e.created_at > p.archived_at""", Integer.class);
+        checks.add(new Check("Projects: archived projects accept no new holds", afterArchive == 0,
+                afterArchive + " holds after archive"));
+
         Integer costMismatch = jdbc.queryForObject("""
                 select count(*) from llm_request_logs l
                 join ledger_entries e on e.tenant_id = l.tenant_id and e.request_id = l.request_id and e.entry_type = 'SETTLE'
@@ -107,7 +131,7 @@ public class LedgerAuditor {
             jdbc.execute("set local role " + TenantAspect.APP_ROLE);
             long total = 0;
             for (String table : List.of("ledger_entries", "llm_request_logs", "semantic_cache", "api_keys", "provider_configs",
-                    "rate_limit_windows")) {
+                    "rate_limit_windows", "projects")) {
                 total += jdbc.queryForObject("select count(*) from " + table + " where tenant_id <> ?", Long.class, a);
             }
             total += jdbc.queryForObject("select count(*) from tenants where id <> ?", Long.class, a);

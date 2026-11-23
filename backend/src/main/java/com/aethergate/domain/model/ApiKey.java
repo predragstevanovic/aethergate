@@ -32,6 +32,9 @@ public class ApiKey extends AssignedIdEntity {
     @Column(name = "rate_limit_tpm", nullable = false)
     private int rateLimitTpm;
 
+    @Column(name = "project_id")
+    private UUID projectId;
+
     @Column(name = "is_active", nullable = false)
     private boolean active;
 
@@ -44,6 +47,10 @@ public class ApiKey extends AssignedIdEntity {
     protected ApiKey() {}
 
     public ApiKey(UUID tenantId, String name, String keyPrefix, String keyHash, int rpm, int tpm) {
+        this(tenantId, name, keyPrefix, keyHash, rpm, tpm, null);
+    }
+
+    public ApiKey(UUID tenantId, String name, String keyPrefix, String keyHash, int rpm, int tpm, UUID projectId) {
         this.id = UUID.randomUUID();
         this.tenantId = tenantId;
         this.name = name;
@@ -51,8 +58,14 @@ public class ApiKey extends AssignedIdEntity {
         this.keyHash = keyHash;
         this.rateLimitRpm = rpm;
         this.rateLimitTpm = tpm;
+        this.projectId = projectId;
         this.active = true;
         this.createdAt = Instant.now();
+    }
+
+    /** Moves the key to another project ({@code null} = unassigned); future requests are charged there. */
+    public void assignProject(UUID projectId) {
+        this.projectId = projectId;
     }
 
     public void revoke() {
@@ -68,6 +81,7 @@ public class ApiKey extends AssignedIdEntity {
     public int getRateLimitRpm() { return rateLimitRpm; }
     public int getRateLimitTpm() { return rateLimitTpm; }
     public boolean isActive() { return active; }
+    public UUID getProjectId() { return projectId; }
     public Instant getLastUsedAt() { return lastUsedAt; }
     public Instant getCreatedAt() { return createdAt; }
 }

@@ -87,6 +87,10 @@ erDiagram
     TENANTS ||--o{ LEDGER_ENTRIES : records
     TENANTS ||--o{ LLM_REQUEST_LOGS : logs
     TENANTS ||--o{ SEMANTIC_CACHE : caches
+    TENANTS ||--o{ PROJECTS : "splits spend into"
+    PROJECTS |o--o{ API_KEYS : groups
+    PROJECTS |o--o{ LEDGER_ENTRIES : "is charged"
+    PROJECTS |o--o{ LLM_REQUEST_LOGS : attributes
 
     TENANTS {
         uuid id PK
@@ -98,6 +102,17 @@ erDiagram
         numeric hard_budget_limit_usd "NUMERIC(19,8)"
     }
 
+    PROJECTS {
+        uuid id PK
+        uuid tenant_id FK "UNIQUE (tenant_id, id)"
+        string name "unique among ACTIVE, case-insensitive"
+        string description
+        numeric monthly_budget_usd "NULL = no cap"
+        string status "ACTIVE, ARCHIVED"
+        bigint version "optimistic lock / ETag"
+        timestamp archived_at
+    }
+
     API_KEYS {
         uuid id PK
         uuid tenant_id FK
@@ -106,6 +121,7 @@ erDiagram
         int rate_limit_rpm
         int rate_limit_tpm
         boolean is_active
+        uuid project_id FK "(tenant_id, project_id) ON DELETE SET NULL"
     }
 
     LEDGER_ENTRIES {
@@ -115,6 +131,7 @@ erDiagram
         string entry_type "TOP_UP, RESERVE, SETTLE, RELEASE"
         numeric amount_usd "NUMERIC(19,8)"
         numeric balance_after_usd "NUMERIC(19,8)"
+        uuid project_id FK "(tenant_id, project_id) RESTRICT"
         timestamp created_at
     }
 
@@ -131,6 +148,7 @@ erDiagram
         int ttft_ms
         string cache_status
         boolean failover_triggered
+        uuid project_id FK "(tenant_id, project_id) RESTRICT"
     }
 
     SEMANTIC_CACHE {
@@ -147,6 +165,51 @@ erDiagram
 1. **Row-Level Security (RLS):** Every tenant-scoped table enforces `tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::uuid`. Even if an application-layer query omits a tenant predicate, PostgreSQL prevents cross-tenant reads or writes.
 2. **Append-Only Ledger Immutability:** A database trigger (`BEFORE UPDATE OR DELETE ON ledger_entries`) blocks any modification or deletion of historical financial records.
 3. **Zero-Trust API Key Storage:** Raw API keys (`ag_live_...`) are displayed once upon generation and stored solely as salted SHA-256 hashes.
+4. **Tenant-safe foreign keys:** PostgreSQL checks foreign keys *without* RLS, so a plain `project_id` FK would let tenant B's row point at tenant A's project. Every project reference is the composite `(tenant_id, project_id) → projects (tenant_id, id)`, which makes a cross-tenant reference impossible even for the table owner.
+
+### 4.3. Projects: cost centres with hierarchical budgets
+
+A tenant splits its AI spend into **projects** (one per product or team). Every API key belongs to at most one project, every
+`RESERVE`/`SETTLE`/`RELEASE` line carries the project it was charged to, and a project may have its own **monthly budget**
+on top of the tenant's balance and hard limit.
+
+```mermaid
+flowchart TB
+    R["POST /v1/chat/completions<br/>key → tenant + project"] --> L["SELECT … FOR UPDATE<br/>tenant row (one lock, both levels)"]
+    L --> T1{"balance ≥ hold?"}
+    T1 -- no --> E1["402 insufficient-quota"]
+    T1 -- yes --> T2{"tenant MTD + reserved + hold<br/>≤ hard_budget_limit?"}
+    T2 -- no --> E2["402 budget-limit-exceeded"]
+    T2 -- yes --> P0{"key has a project?"}
+    P0 -- no --> OK
+    P0 -- yes --> P1{"project ACTIVE?"}
+    P1 -- no --> E3["409 project-archived"]
+    P1 -- yes --> P2{"project MTD settled + open holds + hold<br/>≤ monthly_budget? (NULL = no cap)"}
+    P2 -- no --> E4["402 project-budget-exceeded"]
+    P2 -- yes --> OK["RESERVE (project_id) → stream → SETTLE + RELEASE inherit project_id"]
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> ACTIVE: POST /projects → 201, ETag 0
+    ACTIVE --> ACTIVE: PUT + If-Match (version + 1)
+    ACTIVE --> ARCHIVED: POST /archive — revokes its keys in the same transaction
+    ARCHIVED --> ACTIVE: POST /restore — name must be free, keys stay revoked
+    ACTIVE --> [*]: DELETE — only if it never appears in ledger / logs
+    ARCHIVED --> [*]: DELETE — same rule
+```
+
+| Rule | Where it is enforced |
+|---|---|
+| Name unique among **active** projects, case-insensitive (archived names can be reused) | service check **and** partial unique index `(tenant_id, lower(name)) WHERE status = 'ACTIVE'` (a race ends as 409, not 500) |
+| Max 25 active projects per tenant | service (409) |
+| Edits are conditional: `PUT` needs `If-Match: "<version>"` | 428 if missing, 412 + `current_version` if stale, JPA `@Version` catches the last-instant race |
+| A budget can never be set below the month's committed spend (settled + holds in flight) | service (409), so the invariant *spend ≤ budget* stays true; archive is the "stop now" lever |
+| Archive revokes the project's active keys atomically; key caches are evicted **after commit** | `TransactionSynchronization.afterCommit` (no window in which a stale cache re-admits the key) |
+| A project with metering history is never deleted | service check (409) + `ON DELETE RESTRICT` on ledger/log FKs; the ledger is append-only |
+| Deleting an unused project leaves its keys unassigned | `ON DELETE SET NULL (project_id)` on the composite FK (PostgreSQL 15+ column list) |
+| `RESERVE`, `SETTLE` and `RELEASE` of one request share one project | settle/release copy `project_id` from the hold; verified by the live audit |
+| Moving a key to another project changes where *future* requests are charged; history stays put | `PATCH /tenant/api-keys/{id}` + key-cache eviction |
 
 ---
 
@@ -187,6 +250,19 @@ erDiagram
 - **Decision:** `BigDecimal` is serialised with `toPlainString()` as a JSON **string**; the React console formats it by string manipulation.
 - **Rationale:** JavaScript numbers are binary doubles; `0.00142000` must survive the round trip to the screen unchanged.
 
+### ADR-010: Hierarchical budgets checked under the existing tenant lock
+- **Decision:** The project budget check runs inside `reserveBudget`, after the tenant checks, while the tenant row is held with `SELECT … FOR UPDATE`. Committed project spend = month-to-date `SETTLE` + project holds still in flight (a `RESERVE` without `SETTLE`/`RELEASE`), computed from the ledger rather than a denormalised counter.
+- **Rationale:** One lock already serialises every money movement of a tenant, so both levels are race-free with no new locking (20 concurrent $0.10 holds on a $1 project → exactly 10 pass, tested). Deriving the number from the append-only ledger means there is no second balance that could drift.
+- **Trade-off:** A sum per reservation instead of a counter; indexed by `(tenant_id, project_id, entry_type, created_at)` it stays cheap at this scale.
+
+### ADR-011: Composite `(tenant_id, project_id)` foreign keys
+- **Decision:** `projects` exposes `UNIQUE (tenant_id, id)`; `api_keys`, `ledger_entries` and `llm_request_logs` reference it with composite FKs.
+- **Rationale:** RLS filters what a session can *see*, but FK validation runs as the table owner and ignores RLS. Without the composite key, a bug that passed another tenant's project id would be accepted. Now the database itself refuses it (tested as the table owner).
+
+### ADR-012: Archive instead of delete, optimistic concurrency via ETag / If-Match
+- **Decision:** Projects with history are archived (soft lifecycle state), never deleted; `DELETE` is allowed only for never-used projects. Edits are full replacements (`PUT`) guarded by `If-Match` on a JPA `@Version` ETag.
+- **Rationale:** The ledger is append-only and must keep pointing at the project it charged, so history wins over tidiness. Two admins editing the same budget in two tabs is realistic; the second save gets 412 with the current version instead of silently overwriting the first (the "lost update").
+
 ---
 
 ## 6. As built
@@ -194,17 +270,17 @@ erDiagram
 | Area | Implementation |
 |---|---|
 | Gateway | `POST /v1/chat/completions` (OpenAI-compatible, SSE or JSON), `GET /v1/models`; auth by `X-API-Key` or `Authorization: Bearer ag_live_…` |
-| Console API | `/api/v1/me`, `/dashboard/overview?range=24h\|7d\|30d`, `/dashboard/ledger`, `/tenant/api-keys`, `/tenant/providers`, `/tenant/top-up`, `/playground/completions`, `/auth/demo-session` |
-| Errors | RFC 7807 `application/problem+json` with stable `type` URIs (`insufficient-quota` 402, `budget-limit-exceeded` 402, `rate-limited` 429 + `Retry-After`, `providers-unavailable` 503, `upstream-interrupted` 502) |
-| Database | Schema `aethergate` (shares a Supabase project safely, not exposed via PostgREST), Flyway V1–V3, HNSW index, append-only trigger, RLS USING + WITH CHECK on all tenant tables |
+| Console API | `/api/v1/me`, `/dashboard/overview?range=24h\|7d\|30d`, `/dashboard/ledger`, `/tenant/api-keys` (+ `PATCH` to move a key between projects), `/tenant/projects` (list, create, get, `PUT` with If-Match, `/archive`, `/restore`, `DELETE`), `/tenant/providers`, `/tenant/top-up`, `/playground/completions` (optional `project_id`), `/auth/demo-session` |
+| Errors | RFC 7807 `application/problem+json` with stable `type` URIs (`insufficient-quota` 402, `budget-limit-exceeded` 402, `rate-limited` 429 + `Retry-After`, `providers-unavailable` 503, `upstream-interrupted` 502, `project-budget-exceeded` 402, `project-archived` 409, `conflict` 409, `stale-version` 412, `precondition-required` 428) |
+| Database | Schema `aethergate` (shares a Supabase project safely, not exposed via PostgREST), Flyway V1–V5 (V4 third tenant + named logins, V5 projects with composite tenant-safe FKs), HNSW index, append-only trigger, RLS USING + WITH CHECK on all tenant tables |
 | Demo login | Server-side Supabase password grant; self-healing (resets the demo user via the GoTrue admin API if someone changed its password) |
 
 ## 7. Quality gates
 
 | Gate | Result |
 |---|---|
-| JUnit 5 + AssertJ + Mockito | 98 tests (unit, Testcontainers `pgvector/pgvector:pg17` integration, MockMvc API, ArchUnit) |
+| JUnit 5 + AssertJ + Mockito | 106 tests (unit, Testcontainers `pgvector/pgvector:pg17` integration, MockMvc API, ArchUnit) |
 | JaCoCo (enforced in `mvn verify`) | ≥ 85 % lines **and** branches — currently ~97 % lines / ~88 % branches |
-| Concurrency | 20 simultaneous $0.10 holds on a $1.00 balance → exactly 10 succeed, balance never negative |
+| Concurrency | 20 simultaneous $0.10 holds on a $1.00 balance → exactly 10 succeed, balance never negative; the same against a $1.00 **project** budget |
 | ArchUnit | controllers never touch repositories, no JPA entities in web layer, DTOs are records, no `synchronized` (virtual-thread pinning), no secret constants |
-| Live audit (`--aethergate.tool=audit`) | 10 invariant checks against the production database (funds equation, hold conservation, per-request split, RLS visibility, trigger, vector shape, key hashing) |
+| Live audit (`--aethergate.tool=audit`) | 13 invariant checks against the production database (funds equation, hold conservation, per-request split, one project per request, project spend ≤ budget, no holds after archive, RLS visibility incl. projects, trigger, vector shape, key hashing) |

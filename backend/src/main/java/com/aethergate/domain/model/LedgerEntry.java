@@ -36,6 +36,9 @@ public class LedgerEntry extends AssignedIdEntity {
     @Column(name = "balance_after_usd", nullable = false, precision = 19, scale = 8, updatable = false)
     private BigDecimal balanceAfterUsd;
 
+    @Column(name = "project_id", updatable = false)
+    private UUID projectId;
+
     @Column(length = 255, updatable = false)
     private String description;
 
@@ -46,6 +49,12 @@ public class LedgerEntry extends AssignedIdEntity {
 
     public LedgerEntry(UUID tenantId, String requestId, EntryType entryType, BigDecimal amountUsd,
                        BigDecimal balanceAfterUsd, String description) {
+        this(tenantId, requestId, entryType, amountUsd, balanceAfterUsd, description, null);
+    }
+
+    /** {@code projectId}: the cost centre charged; RESERVE, SETTLE and RELEASE of one request share it. */
+    public LedgerEntry(UUID tenantId, String requestId, EntryType entryType, BigDecimal amountUsd,
+                       BigDecimal balanceAfterUsd, String description, UUID projectId) {
         this.id = UUID.randomUUID();
         this.tenantId = tenantId;
         this.requestId = requestId;
@@ -53,6 +62,7 @@ public class LedgerEntry extends AssignedIdEntity {
         this.amountUsd = amountUsd;
         this.balanceAfterUsd = balanceAfterUsd;
         this.description = description;
+        this.projectId = projectId;
         this.createdAt = Instant.now();
     }
 
@@ -64,5 +74,6 @@ public class LedgerEntry extends AssignedIdEntity {
     public BigDecimal getAmountUsd() { return amountUsd; }
     public BigDecimal getBalanceAfterUsd() { return balanceAfterUsd; }
     public String getDescription() { return description; }
+    public UUID getProjectId() { return projectId; }
     public Instant getCreatedAt() { return createdAt; }
 }

@@ -26,6 +26,9 @@ public class LlmRequestLog extends AssignedIdEntity {
     @Column(name = "api_key_id")
     private UUID apiKeyId;
 
+    @Column(name = "project_id")
+    private UUID projectId;
+
     @Column(name = "provider_used", nullable = false, length = 32)
     private String providerUsed;
 
@@ -65,13 +68,14 @@ public class LlmRequestLog extends AssignedIdEntity {
     protected LlmRequestLog() {}
 
     @SuppressWarnings("java:S107") // a log row is inherently wide
-    public LlmRequestLog(UUID tenantId, String requestId, UUID apiKeyId, String providerUsed, String modelUsed,
+    public LlmRequestLog(UUID tenantId, String requestId, UUID apiKeyId, UUID projectId, String providerUsed, String modelUsed,
                          int promptTokens, int completionTokens, BigDecimal totalCostUsd, BigDecimal savedCostUsd,
                          int latencyMs, int ttftMs, String cacheStatus, boolean failoverTriggered, int statusCode) {
         this.id = UUID.randomUUID();
         this.tenantId = tenantId;
         this.requestId = requestId;
         this.apiKeyId = apiKeyId;
+        this.projectId = projectId;
         this.providerUsed = providerUsed;
         this.modelUsed = modelUsed;
         this.promptTokens = promptTokens;
@@ -91,6 +95,7 @@ public class LlmRequestLog extends AssignedIdEntity {
     public UUID getTenantId() { return tenantId; }
     public String getRequestId() { return requestId; }
     public UUID getApiKeyId() { return apiKeyId; }
+    public UUID getProjectId() { return projectId; }
     public String getProviderUsed() { return providerUsed; }
     public String getModelUsed() { return modelUsed; }
     public int getPromptTokens() { return promptTokens; }

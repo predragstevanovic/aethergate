@@ -66,7 +66,7 @@ public class TenantDirectoryService {
         return keyCache.get(hash, h -> readTx.execute(status -> apiKeys.findByKeyHashAndActiveTrue(h)
                 .flatMap(key -> tenants.findById(key.getTenantId())
                         .map(t -> GatewayPrincipal.forApiKey(t.getId(), t.getName(), key.getId(), key.getKeyPrefix(),
-                                key.getRateLimitRpm(), key.getRateLimitTpm())))));
+                                key.getRateLimitRpm(), key.getRateLimitTpm(), key.getProjectId())))));
     }
 
     /** Returns the user's workspace, creating one (with welcome credit and default routing) on first login. */

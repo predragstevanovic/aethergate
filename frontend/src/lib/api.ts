@@ -45,6 +45,7 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
     throw new ApiError(0, { title: 'Gateway unreachable', detail: `Cannot reach the AetherGate API at ${API_BASE}.` })
   }
   if (!res.ok) throw await toError(res)
+  if (res.status === 204) return undefined as T
   return (await res.json()) as T
 }
 
@@ -54,6 +55,9 @@ export const post = <T,>(path: string, body?: unknown) =>
 export const put = <T,>(path: string, body: unknown) => request<T>(path, { method: 'PUT', body: JSON.stringify(body) })
 export const patch = <T,>(path: string, body: unknown) => request<T>(path, { method: 'PATCH', body: JSON.stringify(body) })
 export const del = <T,>(path: string) => request<T>(path, { method: 'DELETE' })
+/** Conditional replace: the server answers 412 if `version` is no longer current (another tab saved first). */
+export const putIfMatch = <T,>(path: string, version: number, body: unknown) =>
+  request<T>(path, { method: 'PUT', headers: { 'If-Match': `"${version}"` }, body: JSON.stringify(body) })
 
 // ── API types (snake_case mirrors the backend; money is a decimal string) ──────────────
 
@@ -166,6 +170,55 @@ export interface ApiKeyView {
   active: boolean
   last_used_at: string | null
   created_at: string
+  project_id: string | null
+}
+
+export type ProjectStatus = 'ACTIVE' | 'ARCHIVED'
+
+/** committed = month-to-date settled + holds in flight: the number the pre-flight check compares to the budget. */
+export interface ProjectView {
+  id: string
+  name: string
+  description: string | null
+  status: ProjectStatus
+  monthly_budget_usd: Money | null
+  month_to_date_usd: Money
+  open_holds_usd: Money
+  committed_usd: Money
+  remaining_usd: Money | null
+  budget_utilization: number | null
+  requests30d: number
+  cache_hits30d: number
+  cost30d_usd: Money
+  active_keys: number
+  version: number
+  created_at: string
+  updated_at: string
+  archived_at: string | null
+}
+
+export interface ProjectList {
+  projects: ProjectView[]
+  unassigned: { month_to_date_usd: Money; requests30d: number; cost30d_usd: Money }
+  max_active_projects: number
+}
+
+export interface DailyUsage {
+  day: string
+  requests: number
+  cache_hits: number
+  cost_usd: Money
+}
+
+export interface ProjectDetail {
+  project: ProjectView
+  daily: DailyUsage[]
+  keys: { id: string; name: string; key_prefix: string; active: boolean }[]
+}
+
+export interface ArchiveResult {
+  project: ProjectView
+  revoked_keys: number
 }
 
 export interface ProviderView {
@@ -208,7 +261,7 @@ export interface StreamHandlers {
 }
 
 export async function streamPlayground(
-  body: { prompt: string; system?: string; max_tokens?: number; simulate_failure?: boolean },
+  body: { prompt: string; system?: string; max_tokens?: number; simulate_failure?: boolean; project_id?: string | null },
   handlers: StreamHandlers,
   signal?: AbortSignal,
 ): Promise<void> {
