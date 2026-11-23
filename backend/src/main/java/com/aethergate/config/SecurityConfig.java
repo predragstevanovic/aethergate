@@ -128,7 +128,8 @@ public class SecurityConfig {
 
     private static CorsConfigurationSource consoleCors(AetherGateProperties props) {
         CorsConfiguration cfg = new CorsConfiguration();
-        cfg.setAllowedOrigins(props.cors().allowedOrigins().stream().map(String::trim).filter(s -> !s.isEmpty()).distinct().toList());
+        // patterns, so local dev servers on any port (Vite falls back to 5174, 5175, ...) are accepted
+        cfg.setAllowedOriginPatterns(props.cors().allowedOrigins().stream().map(String::trim).filter(s -> !s.isEmpty()).distinct().toList());
         cfg.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
         cfg.setAllowedHeaders(List.of("Authorization", "Content-Type", "X-Simulate-Provider-Failure"));
         cfg.setExposedHeaders(List.of("X-Request-Id", "X-Cache", "Retry-After"));
