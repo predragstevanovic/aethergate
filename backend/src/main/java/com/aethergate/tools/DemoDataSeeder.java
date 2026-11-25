@@ -1,6 +1,8 @@
 package com.aethergate.tools;
 
+import com.aethergate.config.TenantContext;
 import com.aethergate.service.cache.HashingEmbedder;
+import com.aethergate.service.webhook.AlertService;
 import com.aethergate.service.llm.ChatMessage;
 import com.aethergate.service.llm.MockLlmEngine;
 import com.aethergate.service.metering.CostCalculator;
@@ -73,6 +75,30 @@ public class DemoDataSeeder {
                     new GuardrailSeed("Medical record numbers", "REGEX", "\\bMRN-\\d{6}\\b", "REDACT", 0.04),
                     new GuardrailSeed("Payment cards", "PII_CARD", null, "BLOCK", 0.005)));
 
+    /**
+     * A versioned prompt template: v1 (verbose) served the first part of the month, v2 (tighter) was published at
+     * {@code publishAt} of the period. Requests attributed to v2 are the shorter completions, so the version table
+     * shows the cost difference a prompt change makes.
+     */
+    private record PromptSeed(String name, String description, String system, String v1, String v2, String v2Note, double share) {}
+
+    private static final Map<UUID, List<PromptSeed>> PROMPTS = Map.of(
+            VORTEX, List.of(new PromptSeed("support-reply", "Answers customer tickets in the help-desk widget",
+                    "You are a friendly support agent for {{product}}.",
+                    "Answer the customer's question in detail, with examples and links where useful.\nCustomer: {{customer}}\nQuestion: {{question}}",
+                    "Answer in at most three sentences. Offer a link only if it answers the question.\nCustomer: {{customer}}\nQuestion: {{question}}",
+                    "Shorter answers: max 3 sentences", 0.25)),
+            HELIX, List.of(new PromptSeed("error-code-explainer", "Technician help for robot fault codes",
+                    "You are a maintenance assistant for {{robot_model}} warehouse robots.",
+                    "Explain fault code {{code}} thoroughly: causes, diagnostics, and a full repair procedure.",
+                    "Explain fault code {{code}} as a 5-step checklist. Mention the most likely cause first.",
+                    "Checklist format", 0.3)),
+            NIMBUS, List.of(new PromptSeed("discharge-summary", "Plain-language visit summaries for patients",
+                    "You are a clinical documentation assistant for {{clinic}}. Never include identifiers.",
+                    "Summarise this visit for the patient in plain language, covering diagnosis, medication and follow-up:\n{{visit_notes}}",
+                    "Summarise this visit for the patient in at most 5 bullet points at a grade-6 reading level:\n{{visit_notes}}",
+                    "5 bullets, grade-6 reading level", 0.3)));
+
     private static final List<String> VORTEX_PROMPTS = List.of(
             "Summarize this support ticket and suggest a reply",
             "Classify the sentiment of this customer review",
@@ -120,9 +146,11 @@ public class DemoDataSeeder {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate tx;
     private final MockLlmEngine engine;
+    private final AlertService alerts;
 
-    public DemoDataSeeder(JdbcTemplate jdbc, PlatformTransactionManager txManager, MockLlmEngine engine) {
+    public DemoDataSeeder(JdbcTemplate jdbc, PlatformTransactionManager txManager, MockLlmEngine engine, AlertService alerts) {
         this.jdbc = jdbc;
+        this.alerts = alerts;
         this.tx = new TransactionTemplate(txManager);
         this.engine = engine;
     }
@@ -163,6 +191,14 @@ public class DemoDataSeeder {
         List<String> report = new ArrayList<>();
         for (Plan plan : plans) {
             report.add(tx.execute(s -> seedTenant(plan, now)));
+            // alert rules are evaluated by the real service (its own RLS-scoped transaction), exactly as after a settlement
+            int fired = TenantContext.callAs(plan.tenant(), () -> alerts.evaluate(null));
+            for (ProjectSeed p : plan.projects()) {
+                if (p.budget() != null && p.activeUntil() >= 1.0) {
+                    fired += TenantContext.callAs(plan.tenant(), () -> alerts.evaluate(p.id(plan.tenant())));
+                }
+            }
+            report.add(String.format("%-16s %d budget alert(s) fired", plan.label(), fired));
         }
         return report;
     }
@@ -293,10 +329,12 @@ public class DemoDataSeeder {
 
         int cached = warmCache(t, plan, lastSeen, lastCost, lastTokens, now);
         int guardrailHits = seedGuardrails(t, times, rnd);
+        int templated = seedPrompts(t, start, now, rnd);
+        seedAlertRules(t, plan);
         return String.format("%-16s %5d requests | %4d cache hits | %3d failovers | %d projects, %d budget 402s"
-                        + " | %d guardrail hits"
+                        + " | %d guardrail hits | %d template requests"
                         + " | spend $%s | saved $%s | balance $%s | %d cached prompts",
-                plan.label(), logs.size(), hits, failovers, plan.projects().size(), budgetRejections, guardrailHits,
+                plan.label(), logs.size(), hits, failovers, plan.projects().size(), budgetRejections, guardrailHits, templated,
                 CostCalculator.normalize(spend).toPlainString(), CostCalculator.normalize(saved).toPlainString(),
                 available.toPlainString(), cached);
     }
@@ -334,6 +372,8 @@ public class DemoDataSeeder {
         jdbc.execute("alter table ledger_entries disable trigger trg_ledger_entries_append_only");
         jdbc.update("delete from ledger_entries where tenant_id = ?", t);
         jdbc.execute("alter table ledger_entries enable trigger trg_ledger_entries_append_only");
+        jdbc.update("delete from prompt_templates where tenant_id = ?", t); // versions cascade; logs are already gone
+        jdbc.update("delete from alert_rules where tenant_id = ?", t);      // firings cascade
         jdbc.update("delete from guardrail_events where tenant_id = ?", t);
         jdbc.update("delete from guardrail_rules where tenant_id = ?", t);
         jdbc.update("update api_keys set project_id = null where tenant_id = ?", t);
@@ -364,6 +404,52 @@ public class DemoDataSeeder {
         }
         out.sort(null);
         return out;
+    }
+
+    /** Templates with two versions; a share of the request history is attributed to v1 before and v2 after publishing. */
+    private int seedPrompts(UUID t, Instant start, Instant now, Random rnd) {
+        int attributed = 0;
+        for (PromptSeed p : PROMPTS.getOrDefault(t, List.of())) {
+            UUID id = UUID.nameUUIDFromBytes((t + ":prompt:" + p.name()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            Instant created = start.minus(Duration.ofDays(2));
+            Instant published = start.plus(Duration.between(start, now).multipliedBy(6).dividedBy(10));
+            jdbc.update("""
+                    insert into prompt_templates (id, tenant_id, name, description, active_version, version, created_at, updated_at)
+                    values (?, ?, ?, ?, 2, 2, ?, ?)""", id, t, p.name(), p.description(), Timestamp.from(created), Timestamp.from(published));
+            String vars = String.join(",", com.aethergate.service.prompt.PromptTemplateEngine.variables(p.system(), p.v1()));
+            jdbc.update("""
+                    insert into prompt_template_versions (tenant_id, template_id, version_no, system_prompt, user_template, variables,
+                    note, created_by_email, created_at) values (?, ?, 1, ?, ?, ?, 'initial version', 'seed', ?),
+                    (?, ?, 2, ?, ?, ?, ?, 'seed', ?)""", t, id, p.system(), p.v1(), vars, Timestamp.from(created),
+                    t, id, p.system(), p.v2(), vars, p.v2Note(), Timestamp.from(published.minus(Duration.ofHours(20))));
+            Integer median = jdbc.queryForObject("""
+                    select percentile_disc(0.5) within group (order by completion_tokens) from llm_request_logs
+                    where tenant_id = ? and cache_status = 'MISS' and status_code = 200""", Integer.class, t);
+            List<Object[]> updates = new ArrayList<>();
+            jdbc.query("""
+                    select id, created_at, completion_tokens from llm_request_logs
+                    where tenant_id = ? and cache_status = 'MISS' and status_code = 200 and template_id is null order by created_at""",
+                    rs -> {
+                        boolean after = !rs.getTimestamp(2).toInstant().isBefore(published);
+                        boolean fits = after ? rs.getInt(3) < median : rs.getInt(3) >= median;
+                        if (fits && rnd.nextDouble() < p.share() * 2) {
+                            updates.add(new Object[]{id, after ? 2 : 1, rs.getObject(1, UUID.class)});
+                        }
+                    }, t);
+            jdbc.batchUpdate("update llm_request_logs set template_id = ?, template_version = ? where id = ?", updates);
+            attributed += updates.size();
+        }
+        return attributed;
+    }
+
+    /** Workspace alerts at 50 % / 80 % and a 90 % alert for every active project with a budget. */
+    private void seedAlertRules(UUID t, Plan plan) {
+        jdbc.update("insert into alert_rules (tenant_id, project_id, threshold_pct) values (?, null, 50), (?, null, 80)", t, t);
+        for (ProjectSeed p : plan.projects()) {
+            if (p.budget() != null && p.activeUntil() >= 1.0) {
+                jdbc.update("insert into alert_rules (tenant_id, project_id, threshold_pct) values (?, ?, 90)", t, p.id(t));
+            }
+        }
     }
 
     /** Rules created before the month started, and an event for each request that (would have) triggered one. */

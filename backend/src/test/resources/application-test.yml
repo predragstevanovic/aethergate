@@ -1,4 +1,9 @@
 aethergate:
+  webhooks:
+    allow-private-targets: true
+    allow-http: true
+    timeout: 2s
+    poll-interval: 1h   # tests call dispatchDue() themselves; the post-commit kick still runs
   supabase:
     url: http://localhost:1
     anon-key: ""

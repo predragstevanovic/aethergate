@@ -24,7 +24,9 @@ public class ProblemAuthenticationEntryPoint implements AuthenticationEntryPoint
     @Override
     public void commence(HttpServletRequest request, HttpServletResponse response, AuthenticationException authException)
             throws IOException {
-        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.UNAUTHORIZED, detail);
+        Object specific = request.getAttribute(ApiKeyAuthenticationFilter.AUTH_ERROR);
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.UNAUTHORIZED,
+                specific instanceof String s ? s : detail);
         problem.setType(URI.create("https://aethergate.dev/problems/unauthorized"));
         problem.setTitle("Unauthorized");
         problem.setInstance(URI.create(request.getRequestURI()));

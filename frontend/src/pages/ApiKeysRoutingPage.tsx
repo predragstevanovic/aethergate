@@ -1,9 +1,9 @@
-import { ArrowDown, ArrowUp, Check, Copy, Pencil, Plus, Trash2 } from 'lucide-react'
+import { ArrowDown, ArrowUp, Check, Copy, Pencil, Plus, RefreshCcw, SlidersHorizontal, Trash2 } from 'lucide-react'
 import { useEffect, useState, type FormEvent } from 'react'
 import { Badge, Button, EmptyState, ErrorBanner, Field, Modal, PageHeader, Panel, Skeleton, inputClass } from '../components/ui/primitives'
 import { useAsyncAction, useClipboard } from '../hooks/useInteractions'
 import { useResource } from '../hooks/useResource'
-import { API_BASE, del, get, patch, post, put, type ApiKeyView, type ProjectList, type ProjectView, type ProviderView, type WorkspaceSettings } from '../lib/api'
+import { API_BASE, del, get, patch, post, put, putIfMatch, type ApiKeyView, type ProjectList, type ProjectView, type ProviderView, type WorkspaceSettings } from '../lib/api'
 import { dateTime, int, relative, usd, usd8 } from '../lib/format'
 import { useAuth } from '../context/AuthContext'
 
@@ -39,6 +39,8 @@ function KeysPanel() {
   const [creating, setCreating] = useState(false)
   const [created, setCreated] = useState<CreatedKey | null>(null)
   const [confirmRevoke, setConfirmRevoke] = useState<ApiKeyView | null>(null)
+  const [policyFor, setPolicyFor] = useState<ApiKeyView | null>(null)
+  const [rotating, setRotating] = useState<ApiKeyView | null>(null)
   const revoke = useAsyncAction(async (id: string) => {
     await del(`/api/v1/tenant/api-keys/${id}`)
     setConfirmRevoke(null)
@@ -74,7 +76,16 @@ function KeysPanel() {
             <tbody>
               {keys.data.map((k) => (
                 <tr key={k.id} className={`border-b border-line last:border-0 ${k.active ? '' : 'opacity-55'}`}>
-                  <td className="px-5 h-11">{k.name}</td>
+                  <td className="px-5 py-2.5">
+                    {k.name}
+                    {(k.allowed_models.length > 0 || k.ip_allowlist.length > 0) && (
+                      <span className="block text-[11px] text-ink-3">
+                        {k.allowed_models.length > 0 && `models: ${k.allowed_models.join(', ')}`}
+                        {k.allowed_models.length > 0 && k.ip_allowlist.length > 0 && ' · '}
+                        {k.ip_allowlist.length > 0 && `IPs: ${k.ip_allowlist.join(', ')}`}
+                      </span>
+                    )}
+                  </td>
                   <td className="px-3 font-mono text-ink-2">{k.key_prefix}••••••••</td>
                   <td className="px-3">
                     {k.active ? (
@@ -89,14 +100,21 @@ function KeysPanel() {
                   </td>
                   <td className="px-3 text-right font-mono num text-ink-2 whitespace-nowrap">{int(k.rate_limit_rpm)} rpm · {int(k.rate_limit_tpm)} tpm</td>
                   <td className="px-3 text-ink-3 whitespace-nowrap" title={dateTime(k.created_at)}>{relative(k.created_at)}</td>
-                  <td className="px-3">{k.active ? <Badge tone="good" dot>Active</Badge> : <Badge>Revoked</Badge>}</td>
+                  <td className="px-3">
+                    {k.status === 'ACTIVE' ? <Badge tone="good" dot>Active</Badge> : k.status === 'EXPIRED' ? <Badge tone="warn">Expired</Badge> : <Badge>Revoked</Badge>}
+                    {k.status === 'ACTIVE' && k.expires_at && <span className="block text-[11px] text-ink-3" title={dateTime(k.expires_at)}>expires {relative(k.expires_at)}</span>}
+                  </td>
                   <td className="px-5 text-right">
                     {k.active && k.key_prefix === 'ag_live_demo' ? (
                       <span className="text-[12px] text-ink-3">shared demo key</span>
                     ) : k.active && (
-                      <Button size="sm" variant="ghost" aria-label={`Revoke ${k.name}`} icon={<Trash2 className="size-3.5" />} onClick={() => setConfirmRevoke(k)}>
-                        Revoke
-                      </Button>
+                      <span className="inline-flex gap-1">
+                        <Button size="sm" variant="ghost" aria-label={`Policy of ${k.name}`} icon={<SlidersHorizontal className="size-3.5" />} onClick={() => setPolicyFor(k)}>Policy</Button>
+                        {k.status === 'ACTIVE' && (
+                          <Button size="sm" variant="ghost" aria-label={`Rotate ${k.name}`} icon={<RefreshCcw className="size-3.5" />} onClick={() => setRotating(k)}>Rotate</Button>
+                        )}
+                        <Button size="sm" variant="ghost" aria-label={`Revoke ${k.name}`} icon={<Trash2 className="size-3.5" />} onClick={() => setConfirmRevoke(k)} />
+                      </span>
                     )}
                   </td>
                 </tr>
@@ -108,6 +126,9 @@ function KeysPanel() {
 
       <CreateKeyModal projects={activeProjects} open={creating} onClose={() => setCreating(false)} onCreated={(c) => { setCreating(false); setCreated(c); keys.reload() }} />
       <RevealKeyModal created={created} onClose={() => setCreated(null)} />
+      <KeyPolicyModal apiKey={policyFor} onClose={() => setPolicyFor(null)} onSaved={() => { setPolicyFor(null); keys.reload() }} />
+      <RotateKeyModal apiKey={rotating} onClose={() => setRotating(null)}
+        onRotated={(c) => { setRotating(null); setCreated(c); keys.reload() }} />
       <Modal
         open={confirmRevoke !== null}
         title="Revoke API key"
@@ -125,6 +146,105 @@ function KeysPanel() {
         {revoke.error && <div className="mt-3"><ErrorBanner error={revoke.error} compact /></div>}
       </Modal>
     </Panel>
+  )
+}
+
+/** ISO instant → value for <input type="datetime-local"> in the browser's time zone. */
+function toLocalInput(iso: string) {
+  const d = new Date(iso)
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 16)
+}
+
+function KeyPolicyModal({ apiKey, onClose, onSaved }: { apiKey: ApiKeyView | null; onClose: () => void; onSaved: () => void }) {
+  const catalog = useResource(() => get<ProviderView[]>('/api/v1/tenant/providers'), [])
+  const [name, setName] = useState('')
+  const [rpm, setRpm] = useState('')
+  const [tpm, setTpm] = useState('')
+  const [expires, setExpires] = useState('')
+  const [models, setModels] = useState<string[]>([])
+  const [ips, setIps] = useState('')
+  const save = useAsyncAction(async () => {
+    await putIfMatch(`/api/v1/tenant/api-keys/${apiKey!.id}/policy`, apiKey!.version, {
+      name: name.trim(), rate_limit_rpm: Number(rpm), rate_limit_tpm: Number(tpm),
+      expires_at: expires ? new Date(expires).toISOString() : null,
+      allowed_models: models,
+      ip_allowlist: ips.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean),
+    })
+    onSaved()
+  })
+  useEffect(() => {
+    if (!apiKey) return
+    setName(apiKey.name)
+    setRpm(String(apiKey.rate_limit_rpm))
+    setTpm(String(apiKey.rate_limit_tpm))
+    setExpires(apiKey.expires_at ? toLocalInput(apiKey.expires_at) : '')
+    setModels(apiKey.allowed_models)
+    setIps(apiKey.ip_allowlist.join(', '))
+    save.clearError()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiKey])
+  return (
+    <Modal open={apiKey !== null} title={`Key policy · ${apiKey?.key_prefix ?? ''}…`} onClose={onClose}
+      footer={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" loading={save.pending} onClick={() => void save.run()}>Save policy</Button></>}>
+      <div className="space-y-4">
+        <Field label="Name" htmlFor="pol-name"><input id="pol-name" className={inputClass} value={name} maxLength={100} onChange={(e) => setName(e.target.value)} /></Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Requests / min" htmlFor="pol-rpm"><input id="pol-rpm" inputMode="numeric" className={`${inputClass} font-mono num`} value={rpm} onChange={(e) => setRpm(e.target.value.replace(/\D/g, ''))} /></Field>
+          <Field label="Tokens / min" htmlFor="pol-tpm"><input id="pol-tpm" inputMode="numeric" className={`${inputClass} font-mono num`} value={tpm} onChange={(e) => setTpm(e.target.value.replace(/\D/g, ''))} /></Field>
+        </div>
+        <Field label="Expires (your local time)" htmlFor="pol-exp" hint="Empty = never. After this moment the key answers 401 'expired'.">
+          <input id="pol-exp" type="datetime-local" className={inputClass} value={expires} onChange={(e) => setExpires(e.target.value)} />
+        </Field>
+        <fieldset>
+          <legend className="text-[13px] font-medium text-ink-2 mb-1">Allowed models <span className="font-normal text-ink-3">(none ticked = every model in the chain)</span></legend>
+          <div className="grid grid-cols-2 gap-1.5">
+            {(catalog.data ?? []).map((p) => (
+              <label key={p.id} className="flex items-center gap-2 text-[13px] cursor-pointer">
+                <input type="checkbox" className="accent-[var(--accent)]" checked={models.includes(p.model_name)}
+                  onChange={() => setModels((m) => m.includes(p.model_name) ? m.filter((x) => x !== p.model_name) : [...m, p.model_name])} />
+                <span className="font-mono text-[12px]">{p.model_name}</span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
+        <Field label="IP allow-list" htmlFor="pol-ips" hint="CIDR ranges or single IPs, comma separated. Empty = any network. Other sources get 403 ip-not-allowed.">
+          <input id="pol-ips" className={`${inputClass} font-mono text-[12px]`} value={ips} placeholder="203.0.113.0/24, 198.51.100.7" onChange={(e) => setIps(e.target.value)} />
+        </Field>
+        {save.error && <ErrorBanner error={save.error} compact />}
+      </div>
+    </Modal>
+  )
+}
+
+function RotateKeyModal({ apiKey, onClose, onRotated }: { apiKey: ApiKeyView | null; onClose: () => void; onRotated: (c: CreatedKey) => void }) {
+  const [grace, setGrace] = useState('24')
+  const rotate = useAsyncAction(async () => {
+    const r = await post<{ key: ApiKeyView; raw_key: string }>(`/api/v1/tenant/api-keys/${apiKey!.id}/rotate`, { grace_hours: Number(grace) })
+    onRotated({ key: r.key, raw_key: r.raw_key })
+  })
+  useEffect(() => {
+    if (apiKey) {
+      setGrace('24')
+      rotate.clearError()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiKey])
+  return (
+    <Modal open={apiKey !== null} title={`Rotate ${apiKey?.name ?? ''}`} onClose={onClose}
+      footer={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" loading={rotate.pending} onClick={() => void rotate.run()}>Rotate key</Button></>}>
+      <div className="space-y-4 text-[13px] text-ink-2">
+        <p>A new key with the same project, limits and restrictions starts working immediately. The old key keeps working during the grace period, so every service can switch over without downtime.</p>
+        <Field label="Grace period" htmlFor="grace">
+          <select id="grace" className={inputClass} value={grace} onChange={(e) => setGrace(e.target.value)}>
+            <option value="0">None: revoke the old key now</option>
+            <option value="1">1 hour</option>
+            <option value="24">24 hours</option>
+            <option value="168">7 days</option>
+          </select>
+        </Field>
+        {rotate.error && <ErrorBanner error={rotate.error} compact />}
+      </div>
+    </Modal>
   )
 }
 

@@ -1,6 +1,6 @@
 import type { Session } from '@supabase/supabase-js'
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { ApiError, get, post, type Me } from '../lib/api'
+import { ApiError, get, post, selectWorkspace, selectedWorkspace, type Me } from '../lib/api'
 import { supabase } from '../lib/supabase'
 
 interface DemoSession {
@@ -18,7 +18,30 @@ interface AuthState {
   signOut: () => Promise<void>
   /** Re-reads /api/v1/me, e.g. after the workspace was renamed. */
   refreshMe: () => Promise<void>
+  /** Acts in another workspace the user belongs to (own or joined). */
+  switchWorkspace: (id: string) => Promise<void>
+  /** Outcome of an invitation link opened in this tab. */
+  notice: { tone: 'good' | 'bad'; text: string } | null
+  dismissNotice: () => void
 }
+
+const INVITE_KEY = 'aethergate.invite'
+
+/** ?invite=<token> survives the trip through the login page in sessionStorage. */
+function captureInvite() {
+  try {
+    const url = new URL(window.location.href)
+    const token = url.searchParams.get('invite')
+    if (token) {
+      sessionStorage.setItem(INVITE_KEY, token)
+      url.searchParams.delete('invite')
+      window.history.replaceState(null, '', url.pathname + url.search + url.hash)
+    }
+  } catch {
+    /* ignore */
+  }
+}
+captureInvite()
 
 const AuthContext = createContext<AuthState | null>(null)
 
@@ -28,6 +51,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [me, setMe] = useState<Me | null>(null)
   const [sessionLoaded, setSessionLoaded] = useState(false)
   const [meFor, setMeFor] = useState<string | null>(null) // user id the workspace lookup finished for
+  const [notice, setNotice] = useState<{ tone: 'good' | 'bad'; text: string } | null>(null)
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -45,7 +69,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!userId) return
     let cancelled = false
-    get<Me>('/api/v1/me')
+    const load = async () => {
+      const invite = sessionStorage.getItem(INVITE_KEY)
+      if (invite) {
+        sessionStorage.removeItem(INVITE_KEY)
+        try {
+          const joined = await post<{ tenant_id: string; tenant_name: string; role: string }>('/api/v1/invitations/accept', { token: invite })
+          selectWorkspace(joined.tenant_id)
+          setNotice({ tone: 'good', text: `You joined ${joined.tenant_name} as ${joined.role.toLowerCase()}.` })
+        } catch (e) {
+          setNotice({ tone: 'bad', text: e instanceof ApiError ? e.message : 'The invitation could not be accepted.' })
+        }
+      }
+      const m = await get<Me>('/api/v1/me')
+      if (m.workspace_fallback || (selectedWorkspace() && !m.workspaces.some((w) => w.id === selectedWorkspace()))) {
+        selectWorkspace(null) // removed from that workspace: back to the default one
+      }
+      return m
+    }
+    load()
       .then((m) => !cancelled && setMe(m))
       .catch(() => !cancelled && setMe(null))
       .finally(() => !cancelled && setMeFor(userId))
@@ -75,6 +117,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const signOut = useCallback(async () => {
+    selectWorkspace(null)
     await supabase.auth.signOut()
   }, [])
 
@@ -82,9 +125,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setMe(await get<Me>('/api/v1/me'))
   }, [])
 
+  const switchWorkspace = useCallback(async (id: string) => {
+    selectWorkspace(id)
+    setMe(await get<Me>('/api/v1/me'))
+  }, [])
+
+  const dismissNotice = useCallback(() => setNotice(null), [])
+
   const value = useMemo(
-    () => ({ session, me, ready, signIn, signUp, signInDemo, signOut, refreshMe }),
-    [session, me, ready, signIn, signUp, signInDemo, signOut, refreshMe],
+    () => ({ session, me, ready, signIn, signUp, signInDemo, signOut, refreshMe, switchWorkspace, notice, dismissNotice }),
+    [session, me, ready, signIn, signUp, signInDemo, signOut, refreshMe, switchWorkspace, notice, dismissNotice],
   )
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }

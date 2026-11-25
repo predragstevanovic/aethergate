@@ -104,6 +104,16 @@ public class LedgerAuditor {
                     select 1 from ledger_entries e where e.tenant_id = l.tenant_id and e.request_id = l.request_id))""", Integer.class);
         checks.add(new Check("Cache HITs cost $0 and never touch the ledger", hitLeak == 0, hitLeak + " violations"));
 
+        Integer orphanVersions = jdbc.queryForObject("""
+                select count(*) from llm_request_logs l where l.template_id is not null and not exists (
+                    select 1 from prompt_template_versions v where v.template_id = l.template_id and v.version_no = l.template_version)""",
+                Integer.class);
+        checks.add(new Check("Prompt templates: every templated request points at an existing immutable version",
+                orphanVersions == 0, orphanVersions + " requests reference a missing version"));
+        Integer doubleFired = jdbc.queryForObject("""
+                select count(*) from (select rule_id, period from alert_firings group by rule_id, period having count(*) > 1) x""",
+                Integer.class);
+        checks.add(new Check("Budget alerts fired at most once per rule and month", doubleFired == 0, doubleFired + " duplicates"));
         checks.add(rlsCheck());
         checks.add(immutabilityCheck());
 
@@ -131,7 +141,9 @@ public class LedgerAuditor {
             jdbc.execute("set local role " + TenantAspect.APP_ROLE);
             long total = 0;
             for (String table : List.of("ledger_entries", "llm_request_logs", "semantic_cache", "api_keys", "provider_configs",
-                    "rate_limit_windows", "projects", "guardrail_rules", "guardrail_events")) {
+                    "rate_limit_windows", "projects", "guardrail_rules", "guardrail_events", "tenant_members", "audit_events",
+                    "webhook_endpoints", "webhook_deliveries", "alert_rules", "alert_firings", "prompt_templates",
+                    "prompt_template_versions")) {
                 total += jdbc.queryForObject("select count(*) from " + table + " where tenant_id <> ?", Long.class, a);
             }
             total += jdbc.queryForObject("select count(*) from tenants where id <> ?", Long.class, a);

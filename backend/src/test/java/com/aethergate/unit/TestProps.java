@@ -21,7 +21,8 @@ final class TestProps {
                 new AetherGateProperties.Cache(0.96, Duration.ofHours(24), false),
                 new AetherGateProperties.RateLimit(30, 60_000, Duration.ofSeconds(5)),
                 new AetherGateProperties.Providers(openai, anthropic, gemini),
-                new AetherGateProperties.Mock(0, 0, 0, 0));
+                new AetherGateProperties.Mock(0, 0, 0, 0),
+                new AetherGateProperties.Webhooks(true, true, 6, Duration.ofSeconds(2)));
     }
 
     static AetherGateProperties defaults() {

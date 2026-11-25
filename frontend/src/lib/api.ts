@@ -18,10 +18,31 @@ export class ApiError extends Error {
   }
 }
 
+const WORKSPACE_KEY = 'aethergate.workspace'
+
+/** The workspace the console acts in (sent as X-Workspace-Id); null = the user's default workspace. */
+export function selectedWorkspace(): string | null {
+  try {
+    return localStorage.getItem(WORKSPACE_KEY)
+  } catch {
+    return null
+  }
+}
+
+export function selectWorkspace(id: string | null) {
+  try {
+    if (id) localStorage.setItem(WORKSPACE_KEY, id)
+    else localStorage.removeItem(WORKSPACE_KEY)
+  } catch {
+    /* private mode: the default workspace is used */
+  }
+}
+
 async function authHeader(): Promise<Record<string, string>> {
   const { data } = await supabase.auth.getSession()
   const token = data.session?.access_token
-  return token ? { Authorization: `Bearer ${token}` } : {}
+  const ws = selectedWorkspace()
+  return { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(ws ? { 'X-Workspace-Id': ws } : {}) }
 }
 
 async function toError(res: Response): Promise<ApiError> {
@@ -71,10 +92,154 @@ export interface TenantRef {
   demo: boolean
 }
 
+export type MemberRole = 'OWNER' | 'ADMIN' | 'DEVELOPER' | 'VIEWER'
+
+export const ROLE_RANK: Record<MemberRole, number> = { VIEWER: 1, DEVELOPER: 2, ADMIN: 3, OWNER: 4 }
+
+export interface WorkspaceSummary {
+  id: string
+  name: string
+  slug: string
+  role: MemberRole
+  demo: boolean
+  primary_owner: boolean
+}
+
 export interface Me {
   user_id: string
   email: string
   tenant: TenantRef
+  role: MemberRole
+  workspace_fallback: boolean
+  workspaces: WorkspaceSummary[]
+}
+
+export interface MemberView {
+  id: string | null
+  user_id: string | null
+  email: string | null
+  role: MemberRole
+  status: 'ACTIVE' | 'INVITED'
+  primary_owner: boolean
+  you: boolean
+  joined_at: string | null
+  invite_expires_at: string | null
+  invited_by: string | null
+  version: number
+}
+
+export interface TeamList {
+  members: MemberView[]
+  your_role: MemberRole
+  max_members: number
+  assignable_roles: MemberRole[]
+}
+
+export interface CreatedInvitation {
+  member: MemberView
+  token: string
+}
+
+export interface AuditEntry {
+  actor_email: string | null
+  actor_role: MemberRole | null
+  action: string
+  target_id: string | null
+  status_code: number
+  created_at: string
+}
+
+export interface WebhookEndpoint {
+  id: string
+  name: string
+  url: string
+  event_types: string[]
+  enabled: boolean
+  secret_hint: string
+  version: number
+  deliveries24h: number
+  failed24h: number
+  last_status: 'PENDING' | 'SUCCEEDED' | 'DEAD' | null
+  last_delivery_at: string | null
+  created_at: string
+}
+
+export interface WebhookList {
+  endpoints: WebhookEndpoint[]
+  event_types: string[]
+  max_endpoints: number
+}
+
+export interface EndpointWithSecret {
+  endpoint: WebhookEndpoint
+  secret: string
+}
+
+export interface WebhookDelivery {
+  id: string
+  event_id: string
+  event_type: string
+  status: 'PENDING' | 'SUCCEEDED' | 'DEAD'
+  attempts: number
+  last_status_code: number | null
+  last_error: string | null
+  created_at: string
+  next_attempt_at: string | null
+  delivered_at: string | null
+  payload: string
+}
+
+export interface AlertRule {
+  id: string
+  project_id: string | null
+  scope: string
+  threshold_pct: number
+  enabled: boolean
+  spend_usd: Money
+  limit_usd: Money | null
+  used_pct: number
+  fired_this_month_at: string | null
+}
+
+export interface AlertList {
+  rules: AlertRule[]
+  recent: { scope: string; threshold_pct: number; spend_usd: Money; limit_usd: Money; fired_at: string }[]
+  period: string
+}
+
+export interface PromptTemplate {
+  id: string
+  name: string
+  description: string | null
+  active_version: number
+  latest_version: number
+  variables: string[]
+  requests30d: number
+  cost30d: Money
+  version: number
+  updated_at: string
+}
+
+export interface PromptVersion {
+  version: number
+  system_prompt: string | null
+  user_template: string
+  variables: string[]
+  note: string | null
+  created_by: string | null
+  created_at: string
+  active: boolean
+  requests: number
+  avg_cost_usd: Money
+  avg_prompt_tokens: number
+  avg_completion_tokens: number
+  avg_latency_ms: number
+  cache_hit_rate: number
+}
+
+export interface PromptDetail {
+  template: PromptTemplate
+  versions: PromptVersion[]
 }
 
 export interface Kpis {
@@ -171,6 +336,12 @@ export interface ApiKeyView {
   last_used_at: string | null
   created_at: string
   project_id: string | null
+  status: 'ACTIVE' | 'EXPIRED' | 'REVOKED'
+  expires_at: string | null
+  allowed_models: string[]
+  ip_allowlist: string[]
+  rotated_from: string | null
+  version: number
 }
 
 export type ProjectStatus = 'ACTIVE' | 'ARCHIVED'
@@ -304,8 +475,15 @@ export interface StreamHandlers {
   onError: (e: ApiError) => void
 }
 
+export interface TemplateInvocation {
+  id: string
+  version?: number
+  variables: Record<string, string>
+}
+
 export async function streamPlayground(
-  body: { prompt: string; system?: string; max_tokens?: number; simulate_failure?: boolean; project_id?: string | null },
+  body: { prompt?: string; system?: string; max_tokens?: number; simulate_failure?: boolean; project_id?: string | null;
+    template?: TemplateInvocation | null },
   handlers: StreamHandlers,
   signal?: AbortSignal,
 ): Promise<void> {

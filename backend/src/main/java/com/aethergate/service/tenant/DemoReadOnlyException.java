@@ -5,4 +5,8 @@ public class DemoReadOnlyException extends RuntimeException {
     public DemoReadOnlyException() {
         super("The shared demo workspace's settings are read-only; sign in to your own workspace to change them");
     }
+
+    public DemoReadOnlyException(String message) {
+        super(message);
+    }
 }

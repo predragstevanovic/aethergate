@@ -17,7 +17,8 @@ public record AetherGateProperties(
         @DefaultValue Cache cache,
         @DefaultValue RateLimit rateLimit,
         @DefaultValue Providers providers,
-        @DefaultValue Mock mock) {
+        @DefaultValue Mock mock,
+        @DefaultValue Webhooks webhooks) {
 
     public record Cors(@DefaultValue("http://localhost:5173") List<String> allowedOrigins) {}
 
@@ -52,6 +53,16 @@ public record AetherGateProperties(
     }
 
     public record Providers(@DefaultValue Provider openai, @DefaultValue Provider anthropic, @DefaultValue Provider gemini) {}
+
+    /**
+     * Outbound webhooks. {@code allowPrivateTargets}/{@code allowHttp} exist only for tests against a local stub:
+     * in production a webhook can never reach loopback, private, link-local (cloud metadata) or plain-HTTP targets.
+     */
+    public record Webhooks(
+            @DefaultValue("false") boolean allowPrivateTargets,
+            @DefaultValue("false") boolean allowHttp,
+            @DefaultValue("6") int maxAttempts,
+            @DefaultValue("5s") Duration timeout) {}
 
     public record Mock(
             @DefaultValue("80") int ttftMinMs,

@@ -1,6 +1,11 @@
 package com.aethergate.web;
 
 import com.aethergate.service.guardrail.GuardrailBlockedException;
+import com.aethergate.service.team.InvitationEmailMismatchException;
+import com.aethergate.service.team.InvitationInvalidException;
+import com.aethergate.service.tenant.InsufficientRoleException;
+import com.aethergate.service.tenant.KeyPolicyViolationException;
+import com.aethergate.service.tenant.WorkspaceAccessDeniedException;
 import com.aethergate.service.tenant.DemoReadOnlyException;
 import com.aethergate.service.metering.ProjectBudgetExceededException;
 import com.aethergate.service.project.ProjectArchivedException;
@@ -64,6 +69,34 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         p.setProperty("rule", e.getRule());
         p.setProperty("matches", e.getMatches());
         return p;
+    }
+
+    @ExceptionHandler(InsufficientRoleException.class)
+    ProblemDetail insufficientRole(InsufficientRoleException e, HttpServletRequest req) {
+        ProblemDetail p = problem(HttpStatus.FORBIDDEN, "insufficient-role", e.getMessage(), req);
+        p.setProperty("required_role", e.getRequired().name());
+        p.setProperty("your_role", e.getActual().name());
+        return p;
+    }
+
+    @ExceptionHandler(WorkspaceAccessDeniedException.class)
+    ProblemDetail workspaceDenied(WorkspaceAccessDeniedException e, HttpServletRequest req) {
+        return problem(HttpStatus.FORBIDDEN, "workspace-access-denied", e.getMessage(), req);
+    }
+
+    @ExceptionHandler(KeyPolicyViolationException.class)
+    ProblemDetail keyPolicy(KeyPolicyViolationException e, HttpServletRequest req) {
+        return problem(HttpStatus.FORBIDDEN, e.getType(), e.getMessage(), req);
+    }
+
+    @ExceptionHandler(InvitationInvalidException.class)
+    ProblemDetail invitationInvalid(InvitationInvalidException e, HttpServletRequest req) {
+        return problem(HttpStatus.GONE, "invitation-invalid", e.getMessage(), req);
+    }
+
+    @ExceptionHandler(InvitationEmailMismatchException.class)
+    ProblemDetail invitationMismatch(InvitationEmailMismatchException e, HttpServletRequest req) {
+        return problem(HttpStatus.FORBIDDEN, "invitation-email-mismatch", e.getMessage(), req);
     }
 
     @ExceptionHandler(DemoReadOnlyException.class)

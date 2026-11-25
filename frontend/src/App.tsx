@@ -12,6 +12,9 @@ const PlaygroundChaosPage = lazy(() => import('./pages/PlaygroundChaosPage').the
 const LedgerAuditPage = lazy(() => import('./pages/LedgerAuditPage').then((m) => ({ default: m.LedgerAuditPage })))
 const GuardrailsPage = lazy(() => import('./pages/GuardrailsPage').then((m) => ({ default: m.GuardrailsPage })))
 const ProjectsPage = lazy(() => import('./pages/ProjectsPage').then((m) => ({ default: m.ProjectsPage })))
+const TeamPage = lazy(() => import('./pages/TeamPage').then((m) => ({ default: m.TeamPage })))
+const AlertsPage = lazy(() => import('./pages/AlertsPage').then((m) => ({ default: m.AlertsPage })))
+const PromptsPage = lazy(() => import('./pages/PromptsPage').then((m) => ({ default: m.PromptsPage })))
 const ApiKeysRoutingPage = lazy(() => import('./pages/ApiKeysRoutingPage').then((m) => ({ default: m.ApiKeysRoutingPage })))
 
 function PageFallback() {
@@ -57,6 +60,9 @@ const router = createBrowserRouter([
           { path: '/projects', element: page(<ProjectsPage />) },
           { path: '/guardrails', element: page(<GuardrailsPage />) },
           { path: '/settings', element: page(<ApiKeysRoutingPage />) },
+          { path: '/prompts', element: page(<PromptsPage />) },
+          { path: '/alerts', element: page(<AlertsPage />) },
+          { path: '/team', element: page(<TeamPage />) },
         ],
       },
     ],

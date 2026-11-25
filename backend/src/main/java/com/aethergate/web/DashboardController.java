@@ -3,7 +3,8 @@ package com.aethergate.web;
 import com.aethergate.service.tenant.DashboardService;
 import com.aethergate.service.tenant.DashboardViews.LedgerPage;
 import com.aethergate.service.tenant.DashboardViews.Overview;
-import com.aethergate.service.tenant.TenantRef;
+import com.aethergate.service.tenant.WorkspaceAccess;
+import com.aethergate.service.tenant.WorkspaceAccessDeniedException;
 import java.util.Map;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
@@ -25,11 +26,25 @@ public class DashboardController {
         this.dashboard = dashboard;
     }
 
+    /**
+     * Who am I, which workspace am I in, with which role, and which other workspaces can I switch to. Workspace-agnostic:
+     * a stale X-Workspace-Id (e.g. the user was removed) falls back to the default workspace instead of failing.
+     */
     @GetMapping("/me")
+    @WorkspaceAgnostic
     public Map<String, Object> me(@AuthenticationPrincipal Jwt jwt) {
-        TenantRef tenant = currentTenant.of(jwt);
+        WorkspaceAccess access;
+        boolean fallback = false;
+        try {
+            access = currentTenant.access(jwt);
+        } catch (WorkspaceAccessDeniedException e) {
+            access = currentTenant.workspaces(jwt).getFirst();
+            fallback = true;
+        }
         String email = jwt.getClaimAsString("email");
-        return Map.of("user_id", jwt.getSubject(), "email", email == null ? "" : email, "tenant", tenant);
+        return Map.of("user_id", jwt.getSubject(), "email", email == null ? "" : email, "tenant", access.tenant(),
+                "role", access.role().name(), "workspace_fallback", fallback,
+                "workspaces", currentTenant.workspaces(jwt).stream().map(TeamController::summary).toList());
     }
 
     @GetMapping("/dashboard/overview")

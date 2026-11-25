@@ -5,7 +5,13 @@ import com.aethergate.service.GatewayExecution;
 import com.aethergate.service.GatewayOrchestratorService;
 import com.aethergate.service.llm.ChatMessage;
 import com.aethergate.service.llm.RouteTarget;
+import com.aethergate.service.TemplateRef;
+import com.aethergate.service.prompt.PromptService;
+import com.aethergate.service.prompt.PromptService.Rendered;
 import com.aethergate.service.tenant.GatewayPrincipal;
+import com.aethergate.service.tenant.KeyPolicyViolationException;
+import jakarta.servlet.http.HttpServletRequest;
+import java.util.ArrayList;
 import com.aethergate.service.tenant.TenantAdminService;
 import com.aethergate.config.TenantContext;
 import com.aethergate.web.dto.ChatCompletionRequest;
@@ -30,31 +36,59 @@ public class GatewayController {
     private final GatewayOrchestratorService orchestrator;
     private final CompletionResponder responder;
     private final TenantAdminService admin;
+    private final PromptService prompts;
 
-    public GatewayController(GatewayOrchestratorService orchestrator, CompletionResponder responder, TenantAdminService admin) {
+    public GatewayController(GatewayOrchestratorService orchestrator, CompletionResponder responder, TenantAdminService admin,
+                             PromptService prompts) {
         this.orchestrator = orchestrator;
         this.responder = responder;
         this.admin = admin;
+        this.prompts = prompts;
     }
 
     @PostMapping("/chat/completions")
     public ResponseEntity<StreamingResponseBody> chatCompletions(@AuthenticationPrincipal GatewayPrincipal principal,
                                              @Valid @RequestBody ChatCompletionRequest request,
-                                             @RequestHeader(value = "X-Simulate-Provider-Failure", required = false) String simulate) {
-        List<ChatMessage> messages = request.messages().stream().map(m -> new ChatMessage(m.role(), m.content())).toList();
+                                             @RequestHeader(value = "X-Simulate-Provider-Failure", required = false) String simulate,
+                                             HttpServletRequest http) {
+        requireAllowedNetwork(principal, http);
+        List<ChatMessage> messages = new ArrayList<>();
+        TemplateRef template = null;
+        if (request.promptTemplate() != null) { // AetherGate extension: a stored, versioned prompt
+            Rendered r = TenantContext.callAs(principal.tenantId(), () -> prompts.render(request.promptTemplate().id(),
+                    request.promptTemplate().version(), request.promptTemplate().variables()));
+            messages.addAll(r.messages());
+            template = r.ref();
+        }
+        if (request.messages() != null) {
+            request.messages().forEach(m -> messages.add(new ChatMessage(m.role(), m.content())));
+        }
+        if (messages.isEmpty()) {
+            throw new IllegalArgumentException("Provide messages or a prompt_template");
+        }
         GatewayExecution exec = orchestrator.prepare(new CompletionCommand(principal, request.model(), messages,
-                request.maxTokens(), "true".equalsIgnoreCase(simulate)));
+                request.maxTokens(), "true".equalsIgnoreCase(simulate), template));
         String model = request.model() == null || request.model().isBlank() ? "auto" : request.model();
         return request.streaming() ? responder.stream(exec, model) : responder.complete(exec, model);
     }
 
     @GetMapping("/models")
-    public Map<String, Object> models(@AuthenticationPrincipal GatewayPrincipal principal) {
-        List<RouteTarget> chain = TenantContext.callAs(principal.tenantId(), admin::routeChain);
+    public Map<String, Object> models(@AuthenticationPrincipal GatewayPrincipal principal, HttpServletRequest http) {
+        requireAllowedNetwork(principal, http);
+        List<RouteTarget> chain = TenantContext.callAs(principal.tenantId(), admin::routeChain).stream()
+                .filter(t -> principal.policy().allowsModel(t.model())).toList();
         List<Map<String, Object>> data = chain.stream()
                 .map(t -> Map.<String, Object>of("id", t.model(), "object", "model", "owned_by", t.provider().name(),
                         "priority", t.priority()))
                 .toList();
         return Map.of("object", "list", "data", data);
+    }
+
+    /** Behind Caddy, the client address comes from X-Forwarded-For (Caddy overwrites any client-sent value). */
+    private static void requireAllowedNetwork(GatewayPrincipal principal, HttpServletRequest http) {
+        if (!principal.policy().allowsIp(http.getRemoteAddr())) {
+            throw new KeyPolicyViolationException("ip-not-allowed",
+                    "This API key may not be used from " + http.getRemoteAddr() + " (IP allow-list)");
+        }
     }
 }

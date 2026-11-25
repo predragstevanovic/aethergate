@@ -93,6 +93,16 @@ erDiagram
     PROJECTS |o--o{ LLM_REQUEST_LOGS : attributes
     TENANTS ||--o{ GUARDRAIL_RULES : defines
     GUARDRAIL_RULES |o--o{ GUARDRAIL_EVENTS : "fired as"
+    TENANTS ||--o{ TENANT_MEMBERS : "invites / grants roles"
+    TENANTS ||--o{ AUDIT_EVENTS : "append-only history"
+    TENANTS ||--o{ WEBHOOK_ENDPOINTS : notifies
+    WEBHOOK_ENDPOINTS ||--o{ WEBHOOK_DELIVERIES : "outbox rows"
+    TENANTS ||--o{ ALERT_RULES : "budget alerts"
+    PROJECTS |o--o{ ALERT_RULES : scopes
+    ALERT_RULES ||--o{ ALERT_FIRINGS : "once per month"
+    TENANTS ||--o{ PROMPT_TEMPLATES : "prompt library"
+    PROMPT_TEMPLATES ||--|{ PROMPT_TEMPLATE_VERSIONS : "immutable versions"
+    PROMPT_TEMPLATES |o--o{ LLM_REQUEST_LOGS : "version recorded"
 
     TENANTS {
         uuid id PK
@@ -265,6 +275,59 @@ flowchart LR
 | `DELETE /tenant/providers/{id}` | Closes the priority gap (deferrable unique constraint); the last enabled model can never be removed (409). |
 | `GET/PUT /tenant/settings` | Name + monthly hard limit. The limit can never be set below the month's committed spend (settled + reserved). The update takes the **same tenant row lock** as metering instead of an ETag (ADR-014). The shared demo workspace is read-only (403 `demo-read-only`). `/me` is refreshed after commit. |
 
+### 4.6. Team members, roles and the audit log
+
+| Concern | Design |
+|---|---|
+| Model | `tenants.owner_user_id` stays the primary OWNER (never a member row, so it can never be removed); `tenant_members` holds INVITED rows (SHA-256 token, 72 h expiry, no user) and ACTIVE rows (user, no token) — a CHECK constraint enforces exactly those two shapes. |
+| Roles | `VIEWER < DEVELOPER < ADMIN < OWNER`. Enforced server-side by `RoleInterceptor` + `@RequiresRole`; **safe default** without an annotation: GET = Viewer, any write = Admin. |
+| Escalation | You can only grant, change or remove roles strictly below your own (Owners manage Owners); nobody edits their own role; role changes use If-Match. |
+| Workspace selection | One user can own a workspace and belong to others. The console sends `X-Workspace-Id`; membership is resolved per request (30 s cache per user, evicted after commit on any membership change), so a removed member is locked out on the next request. A stale header makes `/me` fall back to the default workspace. |
+| Invitations | Single-use bearer tokens (`inv_…`, 40 base62 chars) shown once; redeemable only by the invited e-mail (from the verified JWT); accepting is an `UPDATE … WHERE status = 'INVITED'`, so two simultaneous accepts cannot both win. |
+| Audit | Every console write — including refused ones (403) — is written to `audit_events` (actor, role, route template, target id, HTTP status). A trigger rejects UPDATE/DELETE, exactly like the ledger. |
+
+### 4.7. Budget alerts and signed webhooks (transactional outbox)
+
+```mermaid
+flowchart LR
+    S["SETTLE committed"] --> E["AlertService.evaluate (async)"]
+    E -->|"INSERT alert_firings ON CONFLICT (rule_id, period) DO NOTHING"| W{"inserted?"}
+    W -- no --> N["already announced this month"]
+    W -- yes --> O["INSERT webhook_deliveries (same tx)"] --> C["commit → wake dispatcher"]
+    C --> D["claim: FOR UPDATE SKIP LOCKED + 2 min lease"] --> P["POST, HMAC-SHA256 signature, no redirects, 5 s timeout"]
+    P -- 2xx --> OK["SUCCEEDED"]
+    P -- "error" --> R["backoff 10 s · 30 s · 2 min · 10 min · 30 min → DEAD"]
+```
+
+| Concern | Design |
+|---|---|
+| Exactly once per month | Decided by the unique index `(rule_id, period)`; only the inserting transaction enqueues the webhook. |
+| Outbox | Deliveries are rows written in the business transaction: rollback ⇒ no webhook; commit ⇒ durable even if the process dies before sending. |
+| Multi-instance | `FOR UPDATE SKIP LOCKED` + lease; a crashed sender's lease simply expires. At-least-once; receivers de-duplicate on `X-AetherGate-Event-Id` (redelivery keeps it). |
+| Signature | `X-AetherGate-Signature: t=<unix>,v1=<hex>` over `t + "." + body` (Stripe scheme): tamper-evident and replay-bounded. Secrets `whsec_…` shown once, rotatable. |
+| SSRF | Save time: HTTPS only, no credentials, no internal names or private literals. **Every send**: re-resolve and require every address to be public (loopback, RFC 1918, link-local/metadata, CGNAT, ULA, multicast refused) — defeats DNS rebinding; redirects never followed. |
+| Events | `budget.threshold_crossed`, `guardrail.blocked` (rule + request id, never the prompt), `api_key.rotated`, `member.joined`, `webhook.test`. |
+
+### 4.8. API key policies and zero-downtime rotation
+
+| Policy | Enforcement | Error |
+|---|---|---|
+| `expires_at` | checked per request in the API-key filter (the cached principal carries the instant) | 401 with a specific detail |
+| `allowed_models` | requested model checked; `auto` routes **only** over allowed models, so the pre-flight hold is priced on them too; cache hits from another model are ignored | 403 `model-not-allowed` |
+| `ip_allowlist` (CIDR, v4/v6) | client address from `X-Forwarded-For`, which Caddy always overwrites; the app port is not public | 403 `ip-not-allowed` |
+| Edits | `PUT …/policy` with If-Match on the key's `@Version`; cache evicted immediately | 412 / 428 |
+| Rotation | `POST …/rotate {grace_hours}`: successor inherits project, limits and restrictions (`rotated_from`); the old key expires after 0–168 h | `api_key.rotated` webhook |
+
+### 4.9. Versioned prompt templates
+
+| Concern | Design |
+|---|---|
+| Immutability | `prompt_template_versions` rows can never be updated (trigger); an edit is always version N+1. |
+| Release control | `prompt_templates.active_version` is the only pointer; publishing / rolling back is an Admin action guarded by If-Match. Developers create drafts that never receive traffic. |
+| Rendering | `{{variable}}` placeholders, single pass over the template (values are inserted literally, so user input cannot inject template syntax); missing variables → 400 listing all of them. Rendered messages then pass guardrails, cache and metering like any prompt. |
+| Attribution | `llm_request_logs.template_id/template_version` (composite tenant-safe FK) → per-version requests, average cost, tokens, latency and cache-hit rate. A template that served traffic cannot be deleted (409). |
+| API | Playground `template` field; gateway extension `"prompt_template": {"id": "<id or name>", "version"?, "variables": {…}}` on `/v1/chat/completions`. |
+
 ---
 
 ## 5. Architecture Decision Records (ADRs)
@@ -325,6 +388,26 @@ flowchart LR
 - **Decision:** `PUT /tenant/settings` has no `If-Match`; it locks the tenant row (`SELECT … FOR UPDATE`) and validates the new limit against committed spend inside that lock.
 - **Rationale:** The tenant row's `@Version` advances with every reservation, so an ETag would be stale within milliseconds under traffic. Projects and guardrails, which only change through CRUD, keep optimistic `If-Match`.
 
+### ADR-015: RBAC in an interceptor with a deny-by-default rule for writes
+- **Decision:** One `RoleInterceptor` resolves workspace + role for every console request and compares it with `@RequiresRole`; without an annotation, reads need Viewer and writes need Admin.
+- **Rationale:** Scattered `if (role…)` checks are forgotten on new endpoints. With a closed default, a new endpoint is admin-only until someone deliberately opens it, and the same hook writes the audit trail (including refusals).
+
+### ADR-016: Primary owner on the tenant row, members in a separate table
+- **Decision:** Keep `tenants.owner_user_id` as the non-removable primary owner; `tenant_members` stores invitations and additional members.
+- **Rationale:** "The last owner can never be removed" becomes structurally impossible instead of a race-prone count check, and the existing demo/owner binding keeps working unchanged.
+
+### ADR-017: Transactional outbox + database-decided idempotency for alerts
+- **Decision:** Alert firings are deduplicated by a unique index and webhooks are written as outbox rows in the same transaction; a dispatcher sends after commit using `SKIP LOCKED` leases.
+- **Rationale:** Sending HTTP inside a transaction announces facts that may roll back; sending after commit without a durable record loses them on a crash. A unique index is the only dedup that survives concurrency across instances.
+
+### ADR-018: SSRF defence re-checked on every delivery
+- **Decision:** Validate webhook URLs at save time **and** re-resolve and validate every target address before each send; never follow redirects.
+- **Rationale:** A check at save time alone is defeated by DNS changes (rebinding) and redirects; on a cloud VM the metadata endpoint (169.254.169.254) would hand out instance credentials.
+
+### ADR-019: Immutable prompt versions with a movable "active" pointer
+- **Decision:** Versions are append-only rows; publishing is a pointer move with optimistic concurrency; requests record the version used.
+- **Rationale:** Rollback becomes instant and safe, and cost/latency can be compared per version because history is never rewritten.
+
 ---
 
 ## 6. As built
@@ -332,17 +415,17 @@ flowchart LR
 | Area | Implementation |
 |---|---|
 | Gateway | `POST /v1/chat/completions` (OpenAI-compatible, SSE or JSON), `GET /v1/models`; auth by `X-API-Key` or `Authorization: Bearer ag_live_…` |
-| Console API | `/api/v1/me`, `/dashboard/overview?range=24h\|7d\|30d`, `/dashboard/ledger`, `/tenant/api-keys` (+ `PATCH` to move a key between projects), `/tenant/projects` (list, create, get, `PUT` with If-Match, `/archive`, `/restore`, `DELETE`), `/tenant/guardrails` (CRUD + `PATCH` toggle + `/test` dry run), `/tenant/settings` (GET/PUT), `/tenant/providers` (add, reprice, delete, reorder, toggle), `/tenant/top-up`, `/playground/completions` (optional `project_id`), `/auth/demo-session` |
-| Errors | RFC 7807 `application/problem+json` with stable `type` URIs (`insufficient-quota` 402, `budget-limit-exceeded` 402, `rate-limited` 429 + `Retry-After`, `providers-unavailable` 503, `upstream-interrupted` 502, `project-budget-exceeded` 402, `project-archived` 409, `conflict` 409, `stale-version` 412, `precondition-required` 428, `guardrail-blocked` 422, `demo-read-only` 403) |
-| Database | Schema `aethergate` (shares a Supabase project safely, not exposed via PostgREST), Flyway V1–V6 (V4 third tenant + named logins, V5 projects with composite tenant-safe FKs, V6 guardrails + model catalog), HNSW index, append-only trigger, RLS USING + WITH CHECK on all tenant tables |
+| Console API | `/api/v1/me`, `/dashboard/overview?range=24h\|7d\|30d`, `/dashboard/ledger`, `/tenant/api-keys` (+ `PATCH` to move a key between projects), `/tenant/projects` (list, create, get, `PUT` with If-Match, `/archive`, `/restore`, `DELETE`), `/tenant/guardrails` (CRUD + `PATCH` toggle + `/test` dry run), `/tenant/settings` (GET/PUT), `/tenant/providers` (add, reprice, delete, reorder, toggle), `/tenant/api-keys/{id}/policy` (PUT If-Match), `/tenant/api-keys/{id}/rotate`, `/workspaces`, `/invitations/accept`, `/tenant/members` (invite, resend, PATCH role If-Match, DELETE), `/tenant/audit`, `/tenant/webhooks` (CRUD, rotate-secret, test, deliveries, redeliver), `/tenant/alerts`, `/tenant/prompts` (CRUD, versions, active-version If-Match, render), `/tenant/top-up`, `/playground/completions` (optional `project_id`), `/auth/demo-session` |
+| Errors | RFC 7807 `application/problem+json` with stable `type` URIs (`insufficient-quota` 402, `budget-limit-exceeded` 402, `rate-limited` 429 + `Retry-After`, `providers-unavailable` 503, `upstream-interrupted` 502, `project-budget-exceeded` 402, `project-archived` 409, `conflict` 409, `stale-version` 412, `precondition-required` 428, `guardrail-blocked` 422, `demo-read-only` 403, `insufficient-role` 403, `workspace-access-denied` 403, `ip-not-allowed` 403, `model-not-allowed` 403, `invitation-invalid` 410, `invitation-email-mismatch` 403) |
+| Database | Schema `aethergate` (shares a Supabase project safely, not exposed via PostgREST), Flyway V1–V7 (V4 third tenant + named logins, V5 projects with composite tenant-safe FKs, V6 guardrails + model catalog, V7 members + audit, webhooks outbox + alerts, key policies, prompt templates), HNSW index, append-only trigger, RLS USING + WITH CHECK on all tenant tables |
 | Demo login | Server-side Supabase password grant; self-healing (resets the demo user via the GoTrue admin API if someone changed its password) |
 
 ## 7. Quality gates
 
 | Gate | Result |
 |---|---|
-| JUnit 5 + AssertJ + Mockito | 119 tests (unit, Testcontainers `pgvector/pgvector:pg17` integration, MockMvc API, ArchUnit) |
-| JaCoCo (enforced in `mvn verify`) | ≥ 85 % lines **and** branches — currently ~97 % lines / ~88 % branches |
+| JUnit 5 + AssertJ + Mockito | 141 tests (unit, Testcontainers `pgvector/pgvector:pg17` integration, MockMvc API, ArchUnit) |
+| JaCoCo (enforced in `mvn verify`) | ≥ 85 % lines **and** branches — currently ~96 % lines / ~86 % branches |
 | Concurrency | 20 simultaneous $0.10 holds on a $1.00 balance → exactly 10 succeed, balance never negative; the same against a $1.00 **project** budget |
 | ArchUnit | controllers never touch repositories, no JPA entities in web layer, DTOs are records, no `synchronized` (virtual-thread pinning), no secret constants |
-| Live audit (`--aethergate.tool=audit`) | 13 invariant checks against the production database (funds equation, hold conservation, per-request split, one project per request, project spend ≤ budget, no holds after archive, RLS visibility incl. projects and guardrails, trigger, vector shape, key hashing) |
+| Live audit (`--aethergate.tool=audit`) | 15 invariant checks against the production database (funds equation, hold conservation, per-request split, one project per request, project spend ≤ budget, no holds after archive, RLS visibility incl. projects, guardrails, members, webhooks, alerts and prompts, templated requests point at an existing version, alerts fired at most once per month, trigger, vector shape, key hashing) |

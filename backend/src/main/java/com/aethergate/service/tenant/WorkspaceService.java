@@ -72,12 +72,11 @@ public class WorkspaceService {
                     + " is below this month's committed spend of $" + committed.toPlainString());
         }
         t.updateSettings(n, limit);
-        UUID owner = t.getOwnerUserId();
         if (TransactionSynchronizationManager.isSynchronizationActive()) {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override
                 public void afterCommit() {
-                    directory.evictOwner(owner); // /me must show the new name
+                    directory.evictAllWorkspaces(); // /me must show the new name to every member
                 }
             });
         }

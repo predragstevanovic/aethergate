@@ -59,7 +59,7 @@ flowchart LR
 
 Seed briše i ponovo puni **samo tri seed tenanta** (Vortex, Helix, Nimbus), po fiksnim UUID-ovima, u jednoj transakciji.
 Pravi tenanti i drugi projekti u istoj bazi se ne diraju. Na kraju se automatski pokreće
-**audit od 13 provera**, na primer:
+**audit od 15 provera**, na primer:
 - da li je ledger izbalansiran;
 - da li se saldo poklapa sa zbirom stavki;
 - da li RLS skriva tuđe redove.

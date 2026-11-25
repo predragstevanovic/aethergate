@@ -22,6 +22,8 @@ import org.springframework.web.filter.OncePerRequestFilter;
 public class ApiKeyAuthenticationFilter extends OncePerRequestFilter {
 
     public static final String HEADER = "X-API-Key";
+    /** Request attribute carrying a specific 401 reason (e.g. an expired key) for the entry point. */
+    public static final String AUTH_ERROR = ApiKeyAuthenticationFilter.class.getName() + ".error";
 
     private final TenantDirectoryService directory;
 
@@ -35,6 +37,12 @@ public class ApiKeyAuthenticationFilter extends OncePerRequestFilter {
         String raw = extract(request);
         if (raw != null && SecurityContextHolder.getContext().getAuthentication() == null) {
             directory.authenticateApiKey(raw).ifPresent(p -> {
+                // checked per request: the principal is cached for 30 s, an expiry is exact to the second
+                if (p.policy().expired(java.time.Instant.now())) {
+                    request.setAttribute(AUTH_ERROR, "This API key expired at " + p.policy().expiresAt()
+                            + " (rotated or time-limited); use its replacement");
+                    return;
+                }
                 var context = SecurityContextHolder.createEmptyContext();
                 context.setAuthentication(new GatewayAuthentication(p));
                 SecurityContextHolder.setContext(context);

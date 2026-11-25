@@ -14,13 +14,17 @@ Row-Level Security.
 | **Data** | Supabase PostgreSQL 17 · pgvector (HNSW) · Row-Level Security · Supabase Auth (ES256 JWKS) |
 | **Frontend** | React 19 · TypeScript · Vite · Tailwind CSS 4 · Recharts — on Vercel |
 | **Ops** | Multi-stage Docker (JRE 21 Alpine, non-root) · Caddy automatic HTTPS · Oracle Cloud Always Free |
-| **Docs** | [Deployment explained](docs/DEPLOYMENT_EXPLAINED.md) · [Demo data & live demo](docs/DEMO_DATA_AND_LIVE_DEMO.md) · [Projects](docs/PROJECTS_EXPLAINED.md) · [Tenant CRUD & guardrails](docs/TENANT_CRUD_EXPLAINED.md) · [System design + ADRs](SYSTEM_DESIGN.md) · [Build blueprint](CLAUDE.md) · [Frontend standard](REACT_FRONTEND_VETERAN_SKILL.md) |
+| **Docs** | [Deployment explained](docs/DEPLOYMENT_EXPLAINED.md) · [Demo data & live demo](docs/DEMO_DATA_AND_LIVE_DEMO.md) · [Projects](docs/PROJECTS_EXPLAINED.md) · [Tenant CRUD & guardrails](docs/TENANT_CRUD_EXPLAINED.md) · [Team, webhooks, key policies, prompts](docs/TEAM_WEBHOOKS_KEYS_PROMPTS.md) · [System design + ADRs](SYSTEM_DESIGN.md) · [Build blueprint](CLAUDE.md) · [Frontend standard](REACT_FRONTEND_VETERAN_SKILL.md) |
 
 ## What it demonstrates
 
 - **Two-phase metering** — `RESERVE` (worst case over the whole fallback chain, under `SELECT … FOR UPDATE`) → stream → `SETTLE` exact cost + `RELEASE` the dust. `RESERVE = SETTLE + RELEASE`, idempotent on `(tenant_id, request_id, entry_type)`. 20 concurrent requests cannot overdraft a balance (tested).
 - **Projects (cost centres) with hierarchical budgets** — keys belong to projects; a project's monthly budget is enforced at pre-flight under the same tenant lock (`402 project-budget-exceeded` while the tenant still has money). Full CRUD with `ETag`/`If-Match` (412/428), archive-revokes-keys, delete only without billing history (409), and composite `(tenant_id, project_id)` FKs so even the DB refuses cross-tenant references. → [explained](docs/PROJECTS_EXPLAINED.md)
 - **Guardrails** — tenant-defined prompt policies (e-mail, payment cards with network prefix + Luhn, keywords, regex) enforced after rate limiting and *before* the cache, the ledger and any provider: BLOCK → `422` at $0, REDACT → providers, cache and logs only ever see `[REDACTED:rule]`. User regexes run under a 25 ms budget and fail closed (ReDoS-safe). → [explained](docs/TENANT_CRUD_EXPLAINED.md)
+- **Team & roles (RBAC)** — invite colleagues as Owner / Admin / Developer / Viewer; roles are enforced by the API on every request (deny-by-default for writes), nobody can grant a role at or above their own, single-use e-mail-bound invitations, workspace switcher, and an append-only audit log that also records refused attempts. → [explained](docs/TEAM_WEBHOOKS_KEYS_PROMPTS.md)
+- **Budget alerts + signed webhooks** — "tell me at 80 %" fires exactly once per month (decided by a unique index), delivered through a transactional outbox with `SKIP LOCKED` leases, Stripe-style HMAC signatures, exponential-backoff retries and SSRF protection re-checked on every send.
+- **API key policies** — expiry, model allow-list (routing and holds only over allowed models), CIDR IP allow-list, and zero-downtime rotation with a grace period.
+- **Prompt library** — versioned `{{variable}}` templates; versions are immutable (DB trigger), Admins publish/roll back, and every request records its version so cost and latency compare per version. Callable from any OpenAI SDK via `prompt_template`.
 - **Tenant self-service CRUD** — model catalog (add / reprice / remove, next hold uses the new price), workspace name + monthly limit (never below committed spend, under the metering row lock), keys moved between projects.
 - **Exact money** — `NUMERIC(19,8)` / `BigDecimal` end to end, sent to the browser as decimal strings.
 - **Semantic cache** — 384-dim embeddings computed offline in Java, HNSW cosine search, ≥ 0.96 similarity → replay in milliseconds at $0, strictly per tenant.
@@ -45,8 +49,8 @@ Public sandbox keys (demo tenants, only SHA-256 hashes are stored): `ag_live_dem
 
 ```bash
 cp .env.example .env.local                      # Supabase + demo values
-cd backend && mvn verify                        # 119 tests incl. Testcontainers (Docker required), coverage gate 85 %
-java -jar target/aethergate.jar --aethergate.tool=seed   # migrate, seed 30 days of demo traffic, run the 13-check audit
+cd backend && mvn verify                        # 141 tests incl. Testcontainers (Docker required), coverage gate 85 %
+java -jar target/aethergate.jar --aethergate.tool=seed   # migrate, seed 30 days of demo traffic, run the 15-check audit
 java -jar target/aethergate.jar                  # API on :8080
 cd ../frontend && npm install && npm run dev     # console on :5173
 ```
@@ -68,6 +72,6 @@ cd ../frontend && npm install && npm run dev     # console on :5173
 
 ```
 backend/   Spring Boot gateway — config · domain · service (metering, cache, ratelimit, llm, tenant, auth) · web · tools
-frontend/  React console — Login · Overview · Playground & Chaos · Ledger · Projects · Guardrails · Settings (workspace, keys, model catalog)
+frontend/  React console — Login · Overview · Playground & Chaos · Ledger · Projects · Guardrails · Prompts · Alerts · Team · Settings (workspace, keys + policies, model catalog)
 deploy/    docker-compose.yml · Caddyfile · OCI setup
 ```

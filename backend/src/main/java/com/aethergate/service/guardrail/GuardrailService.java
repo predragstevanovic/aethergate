@@ -18,6 +18,10 @@ import com.aethergate.service.guardrail.GuardrailViews.TestResult;
 import com.aethergate.service.llm.ChatMessage;
 import com.aethergate.service.ResourceConflictException;
 import com.aethergate.service.StaleVersionException;
+import com.aethergate.service.webhook.WebhookEvents;
+import com.aethergate.service.webhook.WebhookOutbox;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
@@ -47,8 +51,11 @@ public class GuardrailService {
     private final JdbcTemplate jdbc;
     private final ApplicationEventPublisher events;
     private final Clock clock;
+    private final WebhookOutbox outbox;
 
-    public GuardrailService(GuardrailRuleRepository rules, JdbcTemplate jdbc, ApplicationEventPublisher events, Clock clock) {
+    public GuardrailService(GuardrailRuleRepository rules, JdbcTemplate jdbc, ApplicationEventPublisher events, Clock clock,
+                            WebhookOutbox outbox) {
+        this.outbox = outbox;
         this.rules = rules;
         this.jdbc = jdbc;
         this.events = events;
@@ -158,6 +165,14 @@ public class GuardrailService {
             jdbc.update("""
                     insert into guardrail_events (tenant_id, rule_id, rule_name, action, request_id, matches)
                     values (?, ?, ?, ?, ?, ?)""", tenant, m.ruleId(), m.ruleName(), m.action().name(), requestId, m.count());
+            if (m.action() == GuardrailAction.BLOCK) {
+                // same transaction as the event row; the prompt itself is never put in a webhook
+                Map<String, Object> data = new LinkedHashMap<>();
+                data.put("rule", m.ruleName());
+                data.put("matches", m.count());
+                data.put("request_id", requestId);
+                outbox.publish(WebhookEvents.GUARDRAIL_BLOCKED, data);
+            }
         }
     }
 

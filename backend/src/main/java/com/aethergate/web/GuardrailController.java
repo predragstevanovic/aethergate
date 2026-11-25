@@ -84,6 +84,7 @@ public class GuardrailController {
     }
 
     @PostMapping("/test")
+    @RequiresRole(com.aethergate.domain.model.MemberRole.DEVELOPER)
     public TestResult test(@AuthenticationPrincipal Jwt jwt, @Valid @RequestBody GuardrailTestRequest body) {
         return TenantContext.callAs(tenant(jwt), () -> guardrails.test(body.text()));
     }

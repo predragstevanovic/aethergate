@@ -1,4 +1,6 @@
-import { FlaskConical, FolderKanban, Gauge, KeyRound, LogOut, Moon, ScrollText, ShieldCheck, Sun } from 'lucide-react'
+import { BellRing, FlaskConical, FolderKanban, Gauge, KeyRound, LibraryBig, LogOut, Moon, ScrollText, ShieldCheck, Sun, Users, X } from 'lucide-react'
+import { useState } from 'react'
+import { label } from '../../hooks/useRole'
 import { NavLink, Outlet } from 'react-router'
 import { useAuth } from '../../context/AuthContext'
 import { useTheme } from '../../hooks/useTheme'
@@ -12,11 +14,15 @@ const NAV = [
   { to: '/ledger', label: 'Ledger', icon: ScrollText },
   { to: '/projects', label: 'Projects', icon: FolderKanban },
   { to: '/guardrails', label: 'Guardrails', icon: ShieldCheck },
+  { to: '/prompts', label: 'Prompts', icon: LibraryBig },
+  { to: '/alerts', label: 'Alerts', icon: BellRing },
+  { to: '/team', label: 'Team', icon: Users },
   { to: '/settings', label: 'Settings', icon: KeyRound },
 ]
 
 export function AppShell() {
-  const { me, signOut } = useAuth()
+  const { me, signOut, switchWorkspace, notice, dismissNotice } = useAuth()
+  const [switching, setSwitching] = useState(false)
   const { theme, toggle } = useTheme()
   return (
     <div className="min-h-full flex flex-col md:flex-row">
@@ -56,7 +62,16 @@ export function AppShell() {
       <div className="flex-1 min-w-0 flex flex-col">
         <header className="sticky top-0 z-20 flex items-center justify-between gap-4 border-b border-line bg-bg/85 backdrop-blur px-5 sm:px-8 h-14">
           <div className="flex items-center gap-3 min-w-0">
-            <span className="truncate text-[13px] font-medium">{me?.tenant.name ?? '—'}</span>
+            {me && me.workspaces.length > 1 ? (
+              <select aria-label="Workspace" className="h-8 max-w-64 rounded-md border border-line bg-panel px-2 text-[13px] font-medium"
+                value={me.tenant.id} disabled={switching}
+                onChange={async (e) => { setSwitching(true); try { await switchWorkspace(e.target.value) } finally { setSwitching(false) } }}>
+                {me.workspaces.map((w) => <option key={w.id} value={w.id}>{w.name}{w.primary_owner ? '' : ` · ${label(w.role)}`}</option>)}
+              </select>
+            ) : (
+              <span className="truncate text-[13px] font-medium">{me?.tenant.name ?? '—'}</span>
+            )}
+            {me && <Badge tone={me.role === 'VIEWER' ? 'neutral' : me.role === 'DEVELOPER' ? 'warn' : 'good'}>{label(me.role)}</Badge>}
             {me?.tenant.demo && <Badge tone="accent">Demo workspace</Badge>}
             <span className="hidden sm:inline text-[12px] text-ink-3 font-mono truncate">{me?.tenant.slug}</span>
           </div>
@@ -71,8 +86,15 @@ export function AppShell() {
           </div>
         </header>
         <main className="flex-1 px-5 sm:px-8 py-8 max-w-[1280px] w-full mx-auto">
+          {notice && (
+            <div role="status" className={`mb-6 flex items-center gap-3 rounded-md border px-4 py-2.5 text-[13px] ${notice.tone === 'good' ? 'border-good/30 bg-good-soft text-good' : 'border-bad/30 bg-bad-soft text-bad'}`}>
+              <span className="flex-1">{notice.text}</span>
+              <button type="button" aria-label="Dismiss" onClick={dismissNotice}><X className="size-4" /></button>
+            </div>
+          )}
           <ErrorBoundary label="This page">
-            <Outlet />
+            {/* remount pages when the workspace changes, so no page shows the previous workspace's data */}
+            <Outlet key={me?.tenant.id} />
           </ErrorBoundary>
         </main>
       </div>

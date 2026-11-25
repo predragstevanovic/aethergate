@@ -1,6 +1,13 @@
 package com.aethergate.web;
 
 import com.aethergate.config.TenantContext;
+import com.aethergate.domain.model.MemberRole;
+import com.aethergate.service.tenant.AdminViews.KeyPolicyDraft;
+import com.aethergate.service.tenant.AdminViews.RotatedApiKey;
+import com.aethergate.web.dto.KeyPolicyRequest;
+import com.aethergate.web.dto.RotateKeyRequest;
+import org.springframework.http.HttpHeaders;
+import org.springframework.web.bind.annotation.RequestHeader;
 import com.aethergate.service.tenant.AdminViews.ApiKeyView;
 import com.aethergate.service.tenant.AdminViews.CreatedApiKey;
 import com.aethergate.service.tenant.AdminViews.ProviderView;
@@ -55,6 +62,7 @@ public class TenantController {
     }
 
     @PutMapping("/settings")
+    @RequiresRole(MemberRole.OWNER)
     public WorkspaceSettings updateSettings(@AuthenticationPrincipal Jwt jwt, @Valid @RequestBody WorkspaceSettingsRequest body) {
         return TenantContext.callAs(currentTenant.of(jwt).id(), () -> workspace.update(body.name(), body.hardBudgetLimitUsd()));
     }
@@ -66,6 +74,7 @@ public class TenantController {
 
     @PostMapping("/api-keys")
     @ResponseStatus(HttpStatus.CREATED)
+    @RequiresRole(MemberRole.DEVELOPER)
     public CreatedApiKey createKey(@AuthenticationPrincipal Jwt jwt, @Valid @RequestBody CreateApiKeyRequest body) {
         TenantRef tenant = currentTenant.of(jwt);
         return TenantContext.callAs(tenant.id(), () -> admin.createKey(body.name(),
@@ -76,6 +85,27 @@ public class TenantController {
     @PatchMapping("/api-keys/{id}")
     public ApiKeyView assignKey(@AuthenticationPrincipal Jwt jwt, @PathVariable UUID id, @RequestBody AssignKeyProjectRequest body) {
         return TenantContext.callAs(currentTenant.of(jwt).id(), () -> admin.assignKeyToProject(id, body.projectId()));
+    }
+
+    /** Name, limits, expiry, model allow-list, IP allow-list. If-Match with the key's version. */
+    @PutMapping("/api-keys/{id}/policy")
+    public ResponseEntity<ApiKeyView> updateKeyPolicy(@AuthenticationPrincipal Jwt jwt, @PathVariable UUID id,
+                                                      @RequestHeader(value = HttpHeaders.IF_MATCH, required = false) String ifMatch,
+                                                      @Valid @RequestBody KeyPolicyRequest body) {
+        long expected = IfMatch.parse(ifMatch);
+        ApiKeyView v = TenantContext.callAs(currentTenant.of(jwt).id(), () -> admin.updatePolicy(id, expected,
+                new KeyPolicyDraft(body.name(), body.rateLimitRpm(), body.rateLimitTpm(), body.expiresAt(),
+                        body.allowedModels(), body.ipAllowlist())));
+        return ResponseEntity.ok().eTag(IfMatch.etag(v.version())).body(v);
+    }
+
+    /** Zero-downtime rotation: new key now, the old one keeps working for grace_hours (default 24). */
+    @PostMapping("/api-keys/{id}/rotate")
+    @ResponseStatus(HttpStatus.CREATED)
+    public RotatedApiKey rotateKey(@AuthenticationPrincipal Jwt jwt, @PathVariable UUID id,
+                                   @Valid @RequestBody(required = false) RotateKeyRequest body) {
+        int grace = body == null || body.graceHours() == null ? 24 : body.graceHours();
+        return TenantContext.callAs(currentTenant.of(jwt).id(), () -> admin.rotateKey(id, grace));
     }
 
     @DeleteMapping("/api-keys/{id}")
@@ -118,6 +148,7 @@ public class TenantController {
     }
 
     @PostMapping("/top-up")
+    @RequiresRole(MemberRole.OWNER)
     public TopUpResult topUp(@AuthenticationPrincipal Jwt jwt, @Valid @RequestBody TopUpRequest body) {
         return TenantContext.callAs(currentTenant.of(jwt).id(), () -> admin.topUp(body.amountUsd()));
     }

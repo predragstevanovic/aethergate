@@ -65,6 +65,12 @@ public class LlmRequestLog extends AssignedIdEntity {
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 
+    @Column(name = "template_id")
+    private UUID templateId;
+
+    @Column(name = "template_version")
+    private Integer templateVersion;
+
     protected LlmRequestLog() {}
 
     @SuppressWarnings("java:S107") // a log row is inherently wide
@@ -90,6 +96,13 @@ public class LlmRequestLog extends AssignedIdEntity {
         this.createdAt = Instant.now();
     }
 
+    /** Records which prompt template version produced the request (null for free-form prompts). */
+    public LlmRequestLog withTemplate(UUID id, Integer version) {
+        this.templateId = id;
+        this.templateVersion = version;
+        return this;
+    }
+
     @Override
     public UUID getId() { return id; }
     public UUID getTenantId() { return tenantId; }
@@ -108,4 +121,6 @@ public class LlmRequestLog extends AssignedIdEntity {
     public boolean isFailoverTriggered() { return failoverTriggered; }
     public int getStatusCode() { return statusCode; }
     public Instant getCreatedAt() { return createdAt; }
+    public UUID getTemplateId() { return templateId; }
+    public Integer getTemplateVersion() { return templateVersion; }
 }

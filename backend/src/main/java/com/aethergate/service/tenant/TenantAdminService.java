@@ -19,6 +19,17 @@ import com.aethergate.service.project.ProjectArchivedException;
 import com.aethergate.service.ratelimit.RateLimiterService;
 import com.aethergate.service.tenant.AdminViews.ApiKeyView;
 import com.aethergate.service.tenant.AdminViews.CreatedApiKey;
+import com.aethergate.service.tenant.AdminViews.KeyPolicyDraft;
+import com.aethergate.service.tenant.AdminViews.RotatedApiKey;
+import com.aethergate.service.StaleVersionException;
+import com.aethergate.service.webhook.WebhookEvents;
+import com.aethergate.service.webhook.WebhookOutbox;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.Locale;
 import com.aethergate.service.tenant.AdminViews.ProviderView;
 import com.aethergate.service.tenant.AdminViews.TopUpResult;
 import java.math.BigDecimal;
@@ -49,11 +60,17 @@ public class TenantAdminService {
     private final RateLimiterService rateLimiter;
     private final LlmRouterService router;
     private final BigDecimal maxTopUp;
+    private final WebhookOutbox outbox;
+    private final Clock clock;
+    static final int MAX_POLICY_ENTRIES = 10;
+    static final int MAX_GRACE_HOURS = 168;
 
     @SuppressWarnings("java:S107")
     public TenantAdminService(ApiKeyRepository apiKeys, ProviderConfigRepository providers, ProjectRepository projects,
                               MeteringLedgerService ledger, TenantDirectoryService directory, RateLimiterService rateLimiter,
-                              LlmRouterService router, AetherGateProperties properties) {
+                              LlmRouterService router, AetherGateProperties properties, WebhookOutbox outbox, Clock clock) {
+        this.outbox = outbox;
+        this.clock = clock;
         this.apiKeys = apiKeys;
         this.providers = providers;
         this.projects = projects;
@@ -66,7 +83,7 @@ public class TenantAdminService {
 
     @TenantScoped(readOnly = true)
     public List<ApiKeyView> listKeys() {
-        return apiKeys.findAllByOrderByCreatedAtDesc().stream().map(TenantAdminService::view).toList();
+        return apiKeys.findAllByOrderByCreatedAtDesc().stream().map(this::view).toList();
     }
 
     @TenantScoped
@@ -100,6 +117,117 @@ public class TenantAdminService {
         directory.evictKey(key.getKeyHash());
         rateLimiter.invalidate(key.getId());
         return view(key);
+    }
+
+    /**
+     * Replaces a key's name, limits and restrictions. Optimistic (If-Match): two admins editing the same key cannot
+     * silently overwrite each other. The cached principal is evicted, so the next request already sees the policy.
+     */
+    @TenantScoped
+    public ApiKeyView updatePolicy(UUID keyId, long expectedVersion, KeyPolicyDraft d) {
+        ApiKey key = mutableKey(keyId);
+        if (key.getVersion() != expectedVersion) {
+            throw new StaleVersionException(expectedVersion, key.getVersion());
+        }
+        String name = d.name() == null ? "" : d.name().strip();
+        if (name.isEmpty() || name.length() > 100) {
+            throw new IllegalArgumentException("Key name must be 1-100 characters");
+        }
+        if (d.rateLimitRpm() < 1 || d.rateLimitRpm() > 10_000 || d.rateLimitTpm() < 100 || d.rateLimitTpm() > 10_000_000) {
+            throw new IllegalArgumentException("Limits: 1-10,000 requests/min and 100-10,000,000 tokens/min");
+        }
+        if (d.expiresAt() != null && !d.expiresAt().isAfter(clock.instant())) {
+            throw new IllegalArgumentException("Expiry must be in the future (revoke the key to stop it now)");
+        }
+        key.updatePolicy(name, d.rateLimitRpm(), d.rateLimitTpm(), d.expiresAt(), models(d.allowedModels()), networks(d.ipAllowlist()));
+        apiKeys.saveAndFlush(key);
+        directory.evictKey(key.getKeyHash());
+        rateLimiter.invalidate(key.getId());
+        return view(key);
+    }
+
+    /**
+     * Zero-downtime rotation: a new key with the same project, limits and restrictions starts working now; the old
+     * one keeps working for {@code graceHours} (0 = revoked immediately) so every client can be switched over.
+     */
+    @TenantScoped
+    public RotatedApiKey rotateKey(UUID keyId, int graceHours) {
+        if (graceHours < 0 || graceHours > MAX_GRACE_HOURS) {
+            throw new IllegalArgumentException("Grace period must be 0-" + MAX_GRACE_HOURS + " hours");
+        }
+        ApiKey old = mutableKey(keyId);
+        if (old.getExpiresAt() != null && !clock.instant().isBefore(old.getExpiresAt())) {
+            throw new ResourceConflictException("The key has already expired; create a new key instead");
+        }
+        long active = apiKeys.findAllByOrderByCreatedAtDesc().stream().filter(ApiKey::isActive).count();
+        if (graceHours > 0 && active >= MAX_ACTIVE_KEYS) {
+            throw new ResourceConflictException("A workspace can have at most " + MAX_ACTIVE_KEYS + " active keys; rotate with no grace period");
+        }
+        String raw = ApiKeys.generate();
+        ApiKey next = apiKeys.save(old.successor(ApiKeys.displayPrefix(raw), ApiKeys.sha256Hex(raw)));
+        if (graceHours == 0) {
+            old.revoke();
+        } else {
+            old.expireAt(clock.instant().plus(Duration.ofHours(graceHours)));
+        }
+        apiKeys.flush();
+        directory.evictKey(old.getKeyHash());
+        rateLimiter.invalidate(old.getId());
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("name", next.getName());
+        data.put("old_key_prefix", old.getKeyPrefix());
+        data.put("new_key_prefix", next.getKeyPrefix());
+        data.put("old_key_valid_until", old.isActive() ? String.valueOf(old.getExpiresAt()) : "revoked");
+        outbox.publish(WebhookEvents.KEY_ROTATED, data);
+        return new RotatedApiKey(view(next), raw, view(old));
+    }
+
+    private ApiKey mutableKey(UUID keyId) {
+        ApiKey key = apiKeys.findById(keyId).orElseThrow(() -> new NoSuchElementException("API key not found"));
+        if (PUBLIC_DEMO_PREFIX.equals(key.getKeyPrefix())) {
+            throw new IllegalArgumentException("The public demo key is shared by every visitor and cannot be changed");
+        }
+        if (!key.isActive()) {
+            throw new IllegalArgumentException("A revoked key cannot be changed");
+        }
+        return key;
+    }
+
+    /** Every allowed model must be in this workspace's catalog (case-insensitive); stored comma-separated. */
+    private String models(List<String> requested) {
+        if (requested == null || requested.isEmpty()) {
+            return null;
+        }
+        Set<String> catalog = providers.findAllByOrderByPriorityOrderAsc().stream()
+                .map(p -> p.getModelName().toLowerCase(Locale.ROOT)).collect(Collectors.toSet());
+        Set<String> out = new LinkedHashSet<>();
+        for (String m : requested) {
+            String model = m == null ? "" : m.strip();
+            if (!catalog.contains(model.toLowerCase(Locale.ROOT))) {
+                throw new IllegalArgumentException("'" + model + "' is not in this workspace's model catalog");
+            }
+            out.add(model);
+        }
+        if (out.size() > MAX_POLICY_ENTRIES) {
+            throw new IllegalArgumentException("At most " + MAX_POLICY_ENTRIES + " allowed models");
+        }
+        return String.join(",", out);
+    }
+
+    private static String networks(List<String> requested) {
+        if (requested == null || requested.isEmpty()) {
+            return null;
+        }
+        Set<String> out = new LinkedHashSet<>();
+        for (String n : requested) {
+            if (n != null && !n.isBlank()) {
+                out.add(Cidr.parse(n).text()); // throws 400 with the offending entry
+            }
+        }
+        if (out.size() > MAX_POLICY_ENTRIES) {
+            throw new IllegalArgumentException("At most " + MAX_POLICY_ENTRIES + " IP ranges");
+        }
+        return out.isEmpty() ? null : String.join(",", out);
     }
 
     /** Moves an active key to another project ({@code null} = unassigned). Spend history stays where it was charged. */
@@ -253,9 +381,12 @@ public class TenantAdminService {
                 .toList();
     }
 
-    private static ApiKeyView view(ApiKey k) {
+    private ApiKeyView view(ApiKey k) {
+        Instant now = clock.instant();
+        String status = !k.isActive() ? "REVOKED" : k.getExpiresAt() != null && !now.isBefore(k.getExpiresAt()) ? "EXPIRED" : "ACTIVE";
         return new ApiKeyView(k.getId(), k.getName(), k.getKeyPrefix(), k.getRateLimitRpm(), k.getRateLimitTpm(),
-                k.isActive(), k.getLastUsedAt(), k.getCreatedAt(), k.getProjectId());
+                k.isActive(), k.getLastUsedAt(), k.getCreatedAt(), k.getProjectId(), status, k.getExpiresAt(),
+                KeyPolicy.split(k.getAllowedModels()), KeyPolicy.split(k.getIpAllowlist()), k.getRotatedFrom(), k.getVersion());
     }
 
     private ProviderView view(ProviderConfig p) {

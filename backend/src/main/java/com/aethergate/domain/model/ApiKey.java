@@ -4,6 +4,7 @@ import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 import java.time.Instant;
 import java.util.UUID;
 
@@ -44,6 +45,23 @@ public class ApiKey extends AssignedIdEntity {
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
+    @Column(name = "expires_at")
+    private Instant expiresAt;
+
+    /** Comma-separated model names; null = every model in the tenant's chain. */
+    @Column(name = "allowed_models", length = 500)
+    private String allowedModels;
+
+    /** Comma-separated CIDR ranges; null = any network. */
+    @Column(name = "ip_allowlist", length = 500)
+    private String ipAllowlist;
+
+    @Column(name = "rotated_from")
+    private UUID rotatedFrom;
+
+    @Version
+    private long version;
+
     protected ApiKey() {}
 
     public ApiKey(UUID tenantId, String name, String keyPrefix, String keyHash, int rpm, int tpm) {
@@ -72,6 +90,33 @@ public class ApiKey extends AssignedIdEntity {
         this.active = false;
     }
 
+    /** Replaces the key's limits and restrictions (name included); the secret itself never changes. */
+    @SuppressWarnings("java:S107")
+    public void updatePolicy(String newName, int rpm, int tpm, Instant newExpiresAt, String models, String ips) {
+        this.name = newName;
+        this.rateLimitRpm = rpm;
+        this.rateLimitTpm = tpm;
+        this.expiresAt = newExpiresAt;
+        this.allowedModels = models;
+        this.ipAllowlist = ips;
+    }
+
+    /** A successor key with the same project, limits and restrictions (rotation). */
+    public ApiKey successor(String keyPrefix, String keyHash) {
+        ApiKey next = new ApiKey(tenantId, name, keyPrefix, keyHash, rateLimitRpm, rateLimitTpm, projectId);
+        next.allowedModels = allowedModels;
+        next.ipAllowlist = ipAllowlist;
+        next.rotatedFrom = id;
+        return next;
+    }
+
+    /** Rotation grace: the old key keeps working until {@code at}, never longer than it already would have. */
+    public void expireAt(Instant at) {
+        if (expiresAt == null || at.isBefore(expiresAt)) {
+            expiresAt = at;
+        }
+    }
+
     @Override
     public UUID getId() { return id; }
     public UUID getTenantId() { return tenantId; }
@@ -84,4 +129,9 @@ public class ApiKey extends AssignedIdEntity {
     public UUID getProjectId() { return projectId; }
     public Instant getLastUsedAt() { return lastUsedAt; }
     public Instant getCreatedAt() { return createdAt; }
+    public Instant getExpiresAt() { return expiresAt; }
+    public String getAllowedModels() { return allowedModels; }
+    public String getIpAllowlist() { return ipAllowlist; }
+    public UUID getRotatedFrom() { return rotatedFrom; }
+    public long getVersion() { return version; }
 }

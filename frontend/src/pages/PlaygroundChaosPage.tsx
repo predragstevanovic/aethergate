@@ -2,7 +2,7 @@ import { Repeat, Send, ServerCrash, Square } from 'lucide-react'
 import { useCallback, useRef, useState } from 'react'
 import { Badge, Button, CircuitPill, ErrorBanner, PageHeader, Panel, Skeleton, inputClass } from '../components/ui/primitives'
 import { useResource } from '../hooks/useResource'
-import { ApiError, get, streamPlayground, type Overview, type ProjectList, type Telemetry } from '../lib/api'
+import { ApiError, get, streamPlayground, type Overview, type ProjectList, type PromptTemplate, type Telemetry } from '../lib/api'
 import { int, ms, usd8 } from '../lib/format'
 
 const SUGGESTIONS = [
@@ -27,9 +27,14 @@ export function PlaygroundChaosPage() {
   const projectList = useResource(() => get<ProjectList>('/api/v1/tenant/projects'), [])
   const activeProjects = (projectList.data?.projects ?? []).filter((p) => p.status === 'ACTIVE')
   const [projectId, setProjectId] = useState('')
+  const promptList = useResource(() => get<{ templates: PromptTemplate[] }>('/api/v1/tenant/prompts'), [])
+  const templates = promptList.data?.templates ?? []
+  const [templateId, setTemplateId] = useState('')
+  const [vars, setVars] = useState<Record<string, string>>({})
+  const template = templates.find((t) => t.id === templateId) ?? null
 
   const run = useCallback(async (mode: Mode) => {
-    const text = (mode === 'resend' ? lastPrompt : prompt)?.trim()
+    const text = template ? `template:${template.name}` : (mode === 'resend' ? lastPrompt : prompt)?.trim()
     if (!text || streaming) return
     abort.current = new AbortController()
     setStreaming(mode)
@@ -38,7 +43,9 @@ export function PlaygroundChaosPage() {
     setError(null)
     setLastPrompt(text)
     await streamPlayground(
-      { prompt: text, max_tokens: 400, simulate_failure: mode === 'chaos', project_id: projectId || null },
+      template
+        ? { template: { id: template.id, variables: vars }, max_tokens: 400, simulate_failure: mode === 'chaos', project_id: projectId || null }
+        : { prompt: text, max_tokens: 400, simulate_failure: mode === 'chaos', project_id: projectId || null },
       {
         onDelta: (d) => setOutput((o) => o + d),
         onTelemetry: (t) => {
@@ -51,7 +58,7 @@ export function PlaygroundChaosPage() {
     )
     setStreaming(null)
     health.reload()
-  }, [prompt, lastPrompt, streaming, health, projectId])
+  }, [prompt, lastPrompt, streaming, health, projectId, template, vars])
 
   const providers = health.data?.providers ?? []
   const primary = providers.find((p) => p.enabled)
@@ -81,7 +88,29 @@ export function PlaygroundChaosPage() {
 
       <div className="grid gap-4 xl:grid-cols-[1fr_340px]">
         <div className="space-y-4">
-          <Panel title="Prompt">
+          <Panel title="Prompt" action={templates.length > 0 && (
+            <label className="flex items-center gap-2 text-[12px] text-ink-3">
+              Source
+              <select aria-label="Prompt source" className={`${inputClass} h-8 w-52 text-[13px]`} value={templateId}
+                onChange={(e) => { setTemplateId(e.target.value); setVars({}) }}>
+                <option value="">Free text</option>
+                {templates.map((t) => <option key={t.id} value={t.id}>Template: {t.name} (v{t.active_version})</option>)}
+              </select>
+            </label>
+          )}>
+            {template ? (
+              <div className="space-y-3">
+                <p className="text-[12px] text-ink-3">Runs the live version v{template.active_version} of “{template.name}”; the request log records the version.</p>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {template.variables.map((v) => (
+                    <label key={v} className="block text-[12px] text-ink-3">
+                      {v}
+                      <input className={`${inputClass} mt-1`} value={vars[v] ?? ''} onChange={(e) => setVars({ ...vars, [v]: e.target.value })} />
+                    </label>
+                  ))}
+                </div>
+              </div>
+            ) : (<>
             <label htmlFor="prompt" className="sr-only">Prompt</label>
             <textarea
               id="prompt"
@@ -102,14 +131,15 @@ export function PlaygroundChaosPage() {
                 </button>
               ))}
             </div>
+            </>)}
             <div className="mt-5 flex flex-wrap gap-2">
-              <Button variant="primary" icon={<Send className="size-4" />} loading={streaming === 'send'} disabled={!!streaming || !prompt.trim()} onClick={() => void run('send')}>
+              <Button variant="primary" icon={<Send className="size-4" />} loading={streaming === 'send'} disabled={!!streaming || (!template && !prompt.trim())} onClick={() => void run('send')}>
                 Send prompt
               </Button>
               <Button icon={<Repeat className="size-4" />} loading={streaming === 'resend'} disabled={!!streaming || !lastPrompt} onClick={() => void run('resend')}>
                 Re-send same prompt
               </Button>
-              <Button variant="danger" icon={<ServerCrash className="size-4" />} loading={streaming === 'chaos'} disabled={!!streaming || !prompt.trim()} onClick={() => void run('chaos')}>
+              <Button variant="danger" icon={<ServerCrash className="size-4" />} loading={streaming === 'chaos'} disabled={!!streaming || (!template && !prompt.trim())} onClick={() => void run('chaos')}>
                 Simulate primary 503
               </Button>
               {streaming && (

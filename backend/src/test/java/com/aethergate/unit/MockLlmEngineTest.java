@@ -59,7 +59,7 @@ class MockLlmEngineTest {
                 new AetherGateProperties.Supabase("", "", ""), new AetherGateProperties.Demo("", "", ""),
                 new AetherGateProperties.Metering(1, BigDecimal.ONE), new AetherGateProperties.Cache(0.9, Duration.ofHours(1), false),
                 new AetherGateProperties.RateLimit(1, 1, Duration.ofSeconds(1)),
-                new AetherGateProperties.Providers(null, null, null), new AetherGateProperties.Mock(5, 5, 1, 2));
+                new AetherGateProperties.Providers(null, null, null), new AetherGateProperties.Mock(5, 5, 1, 2), null);
         MockLlmEngine paced = new MockLlmEngine(slow);
         long t0 = System.nanoTime();
         paced.stream("m", List.of(new ChatMessage("user", "hello")), 5, d -> { });

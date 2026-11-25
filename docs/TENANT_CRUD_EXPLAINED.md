@@ -1,7 +1,8 @@
 # Šta tenant može sam da upravlja: CRUD operacije u konzoli
 
 > Tehnički detalji: [SYSTEM_DESIGN.md §4.3–4.5, ADR-010…014](../SYSTEM_DESIGN.md) · Projekti posebno:
-> [PROJECTS_EXPLAINED.md](PROJECTS_EXPLAINED.md)
+> [PROJECTS_EXPLAINED.md](PROJECTS_EXPLAINED.md) · **Novo:** tim i uloge, webhook-ovi, politike ključeva, prompt biblioteka →
+> [TEAM_WEBHOOKS_KEYS_PROMPTS.md](TEAM_WEBHOOKS_KEYS_PROMPTS.md)
 
 ## 1. Pregled: pet resursa, svaki sa pravilima koja čuvaju novac ili podatke
 
@@ -14,7 +15,7 @@
 | **Settings → API keys** | ✔ (u projektu) | ✔ | ✔ premesti u projekat | ✔ opoziv | ključ se čuva samo kao SHA-256 |
 
 Svi resursi su izolovani **Row-Level Security-jem u PostgreSQL-u**. Tuđi resurs je uvek **404**, a nove tabele su u
-automatskoj proveri izolacije (audit 13/13).
+automatskoj proveri izolacije (audit 15/15).
 
 ---
 
