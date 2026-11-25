@@ -217,7 +217,8 @@ Login kao **Nimbus Health** (`nimbus.admin@aethergate.dev`, lozinka u `TENANT_LO
    tokena od v1 → *Roll back* na v1 → *Publish* v2. Pomeni da su verzije nepromenljive i da objavljuje samo Admin.
 2. **Playground:** *Source* = `Template: discharge-summary`, popuni `clinic` i `visit_notes` → *Send*. Na *Prompts*
    v2 dobija +1 zahtev.
-3. **Alerts:** pokaži upozorenja na 50 % i 80 % (seed ih je već okinuo) → *Add endpoint* sa URL-om sa
+3. **Alerts:** upozorenje *Clinical Coding* na 75 % je već okinuto (projekat je na ~86 % budžeta), a upozorenja
+   workspace-a na 50 % i 80 % čekaju → *Add endpoint* sa URL-om sa
    [webhook.site](https://webhook.site) → *Send test* → na webhook.site se vidi `X-AetherGate-Signature`.
    Pokušaj sa `https://169.254.169.254/` → **400** (SSRF zaštita).
 4. **Settings → API keys → Policy:** dozvoli samo `gpt-4o-mini` i IP `10.0.0.0/8` → poziv iz terminala daje

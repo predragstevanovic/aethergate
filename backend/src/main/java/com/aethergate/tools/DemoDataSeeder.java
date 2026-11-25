@@ -442,12 +442,12 @@ public class DemoDataSeeder {
         return attributed;
     }
 
-    /** Workspace alerts at 50 % / 80 % and a 90 % alert for every active project with a budget. */
+    /** Workspace alerts at 50 % / 80 % and a 75 % alert for every active project with a budget. */
     private void seedAlertRules(UUID t, Plan plan) {
         jdbc.update("insert into alert_rules (tenant_id, project_id, threshold_pct) values (?, null, 50), (?, null, 80)", t, t);
         for (ProjectSeed p : plan.projects()) {
             if (p.budget() != null && p.activeUntil() >= 1.0) {
-                jdbc.update("insert into alert_rules (tenant_id, project_id, threshold_pct) values (?, ?, 90)", t, p.id(t));
+                jdbc.update("insert into alert_rules (tenant_id, project_id, threshold_pct) values (?, ?, 75)", t, p.id(t));
             }
         }
     }
