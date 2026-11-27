@@ -47,4 +47,73 @@ public interface LedgerEntryRepository extends JpaRepository<LedgerEntry, UUID> 
                                                     com.aethergate.domain.model.EntryType.RELEASE))
             """)
     BigDecimal openProjectHolds(@Param("tenantId") UUID tenantId, @Param("projectId") UUID projectId);
+
+    // V8 spend caps: settled spend and in-flight holds per API key, end user and agent session
+
+    @Query("""
+            select coalesce(sum(e.amountUsd), 0) from LedgerEntry e
+            where e.tenantId = :tenantId and e.apiKeyId = :keyId and e.entryType = :type and e.createdAt >= :since
+            """)
+    BigDecimal sumKeySince(@Param("tenantId") UUID tenantId, @Param("keyId") UUID keyId, @Param("type") EntryType type,
+                           @Param("since") Instant since);
+
+    @Query("""
+            select coalesce(sum(r.amountUsd), 0) from LedgerEntry r
+            where r.tenantId = :tenantId and r.apiKeyId = :keyId
+              and r.entryType = com.aethergate.domain.model.EntryType.RESERVE
+              and not exists (select 1 from LedgerEntry c
+                              where c.tenantId = r.tenantId and c.requestId = r.requestId
+                                and c.entryType in (com.aethergate.domain.model.EntryType.SETTLE,
+                                                    com.aethergate.domain.model.EntryType.RELEASE))
+            """)
+    BigDecimal openKeyHolds(@Param("tenantId") UUID tenantId, @Param("keyId") UUID keyId);
+
+    @Query("""
+            select coalesce(sum(e.amountUsd), 0) from LedgerEntry e
+            where e.tenantId = :tenantId and e.endUserId = :user and e.entryType = :type and e.createdAt >= :since
+            """)
+    BigDecimal sumEndUserSince(@Param("tenantId") UUID tenantId, @Param("user") String endUser, @Param("type") EntryType type,
+                               @Param("since") Instant since);
+
+    @Query("""
+            select coalesce(sum(r.amountUsd), 0) from LedgerEntry r
+            where r.tenantId = :tenantId and r.endUserId = :user
+              and r.entryType = com.aethergate.domain.model.EntryType.RESERVE
+              and not exists (select 1 from LedgerEntry c
+                              where c.tenantId = r.tenantId and c.requestId = r.requestId
+                                and c.entryType in (com.aethergate.domain.model.EntryType.SETTLE,
+                                                    com.aethergate.domain.model.EntryType.RELEASE))
+            """)
+    BigDecimal openEndUserHolds(@Param("tenantId") UUID tenantId, @Param("user") String endUser);
+
+    @Query("""
+            select coalesce(sum(e.amountUsd), 0) from LedgerEntry e
+            where e.tenantId = :tenantId and e.sessionId = :session and e.entryType = :type
+            """)
+    BigDecimal sumSession(@Param("tenantId") UUID tenantId, @Param("session") String session, @Param("type") EntryType type);
+
+    @Query("""
+            select count(e) from LedgerEntry e
+            where e.tenantId = :tenantId and e.sessionId = :session
+              and e.entryType = com.aethergate.domain.model.EntryType.RESERVE
+            """)
+    long countSessionHolds(@Param("tenantId") UUID tenantId, @Param("session") String session);
+
+    @Query("""
+            select coalesce(sum(r.amountUsd), 0) from LedgerEntry r
+            where r.tenantId = :tenantId and r.sessionId = :session
+              and r.entryType = com.aethergate.domain.model.EntryType.RESERVE
+              and not exists (select 1 from LedgerEntry c
+                              where c.tenantId = r.tenantId and c.requestId = r.requestId
+                                and c.entryType in (com.aethergate.domain.model.EntryType.SETTLE,
+                                                    com.aethergate.domain.model.EntryType.RELEASE))
+            """)
+    BigDecimal openSessionHolds(@Param("tenantId") UUID tenantId, @Param("session") String session);
+
+    @Query("""
+            select e.apiKeyId, coalesce(sum(e.amountUsd), 0) from LedgerEntry e
+            where e.tenantId = :tenantId and e.apiKeyId is not null and e.entryType = :type and e.createdAt >= :since
+            group by e.apiKeyId
+            """)
+    List<Object[]> sumByKeySince(@Param("tenantId") UUID tenantId, @Param("type") EntryType type, @Param("since") Instant since);
 }

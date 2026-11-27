@@ -3,6 +3,7 @@ package com.aethergate.tools;
 import com.aethergate.config.TenantContext;
 import com.aethergate.service.cache.HashingEmbedder;
 import com.aethergate.service.webhook.AlertService;
+import com.aethergate.service.finops.AnomalyService;
 import com.aethergate.service.llm.ChatMessage;
 import com.aethergate.service.llm.MockLlmEngine;
 import com.aethergate.service.metering.CostCalculator;
@@ -147,8 +148,33 @@ public class DemoDataSeeder {
     private final TransactionTemplate tx;
     private final MockLlmEngine engine;
     private final AlertService alerts;
+    private final AnomalyService anomalies;
 
-    public DemoDataSeeder(JdbcTemplate jdbc, PlatformTransactionManager txManager, MockLlmEngine engine, AlertService alerts) {
+    /** Who calls and what for: end users, cost tags per project and agent sessions (V8 attribution). */
+    private record Audience(List<String> users, Map<String, String> features, String team) {}
+
+    private static final Map<UUID, Audience> AUDIENCES = Map.of(
+            VORTEX, new Audience(List.of("globex", "acme-corp", "initech", "umbrella", "hooli", "stark-industries", "wayne-ent"),
+                    Map.of("Support Copilot", "support-reply", "Docs Search", "docs-qa", "Growth Experiments", "marketing-copy",
+                            "Legacy Chatbot", "web-widget"), "platform"),
+            HELIX, new Audience(List.of("warehouse-berlin", "warehouse-austin", "tech-mila", "tech-jonas", "night-shift"),
+                    Map.of("Fleet Telemetry", "anomaly-summary", "Maintenance Assistant", "error-code-qa"), "robotics"),
+            NIMBUS, new Audience(List.of("ward-cardio", "ward-onco", "coder-anna", "coder-luis", "research-team"),
+                    Map.of("Patient Messaging", "patient-summary", "Clinical Coding", "icd10-suggest", "Research Sandbox",
+                            "research"), "clinical"));
+
+    /** One open agent session per end user: consecutive requests within 20 minutes continue it. */
+    private static final class OpenSession {
+        String id;
+        int stepsLeft;
+        Instant last;
+    }
+
+    private record Attr(UUID apiKey, String endUser, String session, String tagsJson) {}
+
+    public DemoDataSeeder(JdbcTemplate jdbc, PlatformTransactionManager txManager, MockLlmEngine engine, AlertService alerts,
+                          AnomalyService anomalies) {
+        this.anomalies = anomalies;
         this.jdbc = jdbc;
         this.alerts = alerts;
         this.tx = new TransactionTemplate(txManager);
@@ -199,6 +225,8 @@ public class DemoDataSeeder {
                 }
             }
             report.add(String.format("%-16s %d budget alert(s) fired", plan.label(), fired));
+            int spikes = TenantContext.callAs(plan.tenant(), () -> anomalies.scan(AnomalyService.VIEW_HOURS));
+            report.add(String.format("%-16s %d cost anomaly hour(s) detected", plan.label(), spikes));
         }
         return report;
     }
@@ -219,6 +247,9 @@ public class DemoDataSeeder {
         Map<String, Instant> lastSeen = new HashMap<>();
         Map<String, BigDecimal> lastCost = new HashMap<>();
         Map<String, Integer> lastTokens = new HashMap<>();
+        UUID demoKey = jdbc.query("select id from api_keys where tenant_id = ? and key_prefix = 'ag_live_demo'",
+                (rs, n) -> rs.getObject(1, UUID.class), t).stream().findFirst().orElse(null);
+        Map<String, OpenSession> sessions = new HashMap<>();
 
         BigDecimal available = BigDecimal.ZERO;
         BigDecimal topUpTotal = BigDecimal.ZERO;
@@ -247,6 +278,7 @@ public class DemoDataSeeder {
             double progress = (double) Duration.between(start, at).toSeconds() / Duration.between(start, now).toSeconds();
             ProjectSeed project = pickProject(plan.projects(), progress, rnd); // by time: archived projects get no later traffic
             UUID projectId = project == null ? null : project.id(t);
+            Attr attr = attribution(t, project, at, demoKey, sessions, rnd);
             String prompt = pickPrompt(plan.prompts(), rnd);
             if (rnd.nextDouble() < 0.6) {
                 prompt = prompt + " (ref #" + (10_000 + rnd.nextInt(90_000)) + ")"; // one-off context: never cacheable
@@ -262,7 +294,7 @@ public class DemoDataSeeder {
                 saved = saved.add(original);
                 int ttft = 4 + rnd.nextInt(14);
                 logs.add(log(t, requestId, projectId, "CACHE", plan.primary().name(), promptTokens, lastTokens.get(prompt),
-                        BigDecimal.ZERO, original, ttft + rnd.nextInt(10), ttft, "HIT", false, 200, at));
+                        BigDecimal.ZERO, original, ttft + rnd.nextInt(10), ttft, "HIT", false, 200, at, attr));
                 continue;
             }
 
@@ -279,15 +311,15 @@ public class DemoDataSeeder {
             }
             available = available.subtract(hold);
             ledger.add(row(t, requestId, "RESERVE", hold, available, "Pre-flight hold: " + promptTokens + " prompt + "
-                    + plan.maxTokens() + " max completion tokens", at, projectId));
+                    + plan.maxTokens() + " max completion tokens", at, projectId, attr));
 
             double roll = rnd.nextDouble();
             if (roll < 0.004) { // outage of both providers: whole hold released
                 available = available.add(hold);
                 ledger.add(row(t, requestId, "RELEASE", hold, available, "All providers unavailable", at.plusMillis(900),
-                        projectId));
+                        projectId, attr));
                 logs.add(log(t, requestId, projectId, "NONE", plan.primary().name(), promptTokens, 0, BigDecimal.ZERO, BigDecimal.ZERO,
-                        900, 900, "MISS", true, 503, at));
+                        900, 900, "MISS", true, 503, at, attr));
                 continue;
             }
             boolean failover = roll < 0.03;
@@ -299,14 +331,14 @@ public class DemoDataSeeder {
             Instant done = at.plusMillis(latency);
             BigDecimal release = hold.subtract(cost);
             ledger.add(row(t, requestId, "SETTLE", cost, available, used.name() + ": " + promptTokens + " in / " + completion
-                    + " out tokens", done, projectId));
+                    + " out tokens", done, projectId, attr));
             available = available.add(release);
-            ledger.add(row(t, requestId, "RELEASE", release, available, "Unused hold returned", done, projectId));
+            ledger.add(row(t, requestId, "RELEASE", release, available, "Unused hold returned", done, projectId, attr));
             if (projectId != null && !done.isBefore(monthStart)) {
                 projectMtd.merge(projectId, cost, BigDecimal::add);
             }
             logs.add(log(t, requestId, projectId, used.provider(), used.name(), promptTokens, completion, cost, BigDecimal.ZERO,
-                    latency, ttft, "MISS", failover, 200, at));
+                    latency, ttft, "MISS", failover, 200, at, attr));
             spend = spend.add(cost);
             if (failover) {
                 failovers++;
@@ -316,15 +348,49 @@ public class DemoDataSeeder {
             lastTokens.put(prompt, completion);
         }
 
+        int spikeSteps = 0;
+        if (t.equals(VORTEX)) { // a runaway research agent four hours ago: the anomaly detector and the step cap catch it
+            Model gpt = plan.primary();
+            UUID growth = plan.projects().stream().filter(p -> p.budget() == null).findFirst().map(p -> p.id(t)).orElse(null);
+            Attr agent = new Attr(demoKey, "globex", SPIKE_SESSION, "{\"env\":\"prod\",\"feature\":\"deep-research\",\"team\":\"platform\"}");
+            Instant spikeStart = now.minus(Duration.ofHours(5)).truncatedTo(ChronoUnit.HOURS).plus(Duration.ofMinutes(7));
+            for (int s = 0; s < SPIKE_MAX_STEPS; s++) {
+                Instant at = spikeStart.plusSeconds(s * 48L + rnd.nextInt(20));
+                String requestId = "req_seed_agent_" + s;
+                int promptTokens = 1800 + s * 60; // the agent keeps appending tool output to its context
+                BigDecimal hold = CostCalculator.estimatedMaxCost(promptTokens, plan.maxTokens(), gpt.in(), gpt.out())
+                        .max(CostCalculator.estimatedMaxCost(promptTokens, plan.maxTokens(), plan.fallback().in(), plan.fallback().out()));
+                if (available.compareTo(hold) < 0) {
+                    break;
+                }
+                available = available.subtract(hold);
+                ledger.add(row(t, requestId, "RESERVE", hold, available, "Pre-flight hold: agent step " + (s + 1), at, growth, agent));
+                int completion = 380 + rnd.nextInt(260);
+                BigDecimal cost = CostCalculator.actualCost(promptTokens, completion, gpt.in(), gpt.out());
+                int ttft = 260 + rnd.nextInt(300);
+                int latency = ttft + completion * (12 + rnd.nextInt(8));
+                Instant done = at.plusMillis(latency);
+                ledger.add(row(t, requestId, "SETTLE", cost, available, gpt.name() + ": " + promptTokens + " in / " + completion
+                        + " out tokens", done, growth, agent));
+                available = available.add(hold.subtract(cost));
+                ledger.add(row(t, requestId, "RELEASE", hold.subtract(cost), available, "Unused hold returned", done, growth, agent));
+                logs.add(log(t, requestId, growth, gpt.provider(), gpt.name(), promptTokens, completion, cost, BigDecimal.ZERO,
+                        latency, ttft, "MISS", false, 200, at, agent));
+                spend = spend.add(cost);
+                spikeSteps++;
+            }
+        }
+
         jdbc.batchUpdate("""
                 insert into ledger_entries (id, tenant_id, request_id, entry_type, amount_usd, balance_after_usd, description,
-                                            created_at, project_id)
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?)""", ledger);
+                                            created_at, project_id, api_key_id, end_user_id, session_id)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", ledger);
         jdbc.batchUpdate("""
                 insert into llm_request_logs (id, tenant_id, request_id, project_id, provider_used, model_used, prompt_tokens,
                     completion_tokens, total_cost_usd, saved_cost_usd, latency_ms, ttft_ms, cache_status, failover_triggered,
-                    status_code, created_at)
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", logs);
+                    status_code, created_at, api_key_id, end_user_id, session_id, tags, requested_model)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, 'auto')""", logs);
+        seedCostControls(t, spikeSteps, now);
         jdbc.update("update tenants set available_balance_usd = ?, reserved_balance_usd = 0 where id = ?", available, t);
 
         int cached = warmCache(t, plan, lastSeen, lastCost, lastTokens, now);
@@ -368,6 +434,8 @@ public class DemoDataSeeder {
     private void reset(UUID t, Plan plan) {
         jdbc.update("delete from semantic_cache where tenant_id = ?", t);
         jdbc.update("delete from llm_request_logs where tenant_id = ?", t);
+        jdbc.update("delete from cost_anomalies where tenant_id = ?", t);
+        jdbc.update("delete from cost_control_events where tenant_id = ?", t);
         jdbc.update("delete from rate_limit_windows where tenant_id = ?", t);
         jdbc.execute("alter table ledger_entries disable trigger trg_ledger_entries_append_only");
         jdbc.update("delete from ledger_entries where tenant_id = ?", t);
@@ -384,6 +452,11 @@ public class DemoDataSeeder {
                 values (?, ?, ?, 1, ?, ?), (?, ?, ?, 2, ?, ?)""",
                 t, plan.primary().provider(), plan.primary().name(), plan.primary().in(), plan.primary().out(),
                 t, plan.fallback().provider(), plan.fallback().name(), plan.fallback().in(), plan.fallback().out());
+        if (t.equals(VORTEX)) { // the cheap model the soft-limit downgrade routes to
+            jdbc.update("""
+                    insert into provider_configs (tenant_id, provider, model_name, priority_order, input_cost_per_1m, output_cost_per_1m)
+                    values (?, 'OPENAI', 'gpt-4o-mini', 3, 0.15, 0.60)""", t);
+        }
         jdbc.update("update api_keys set is_active = false where tenant_id = ? and key_prefix <> 'ag_live_demo'", t);
     }
 
@@ -519,16 +592,84 @@ public class DemoDataSeeder {
     @SuppressWarnings("java:S107")
     private static Object[] row(UUID tenant, String requestId, String type, BigDecimal amount, BigDecimal after,
                                 String description, Instant at, UUID project) {
+        return row(tenant, requestId, type, amount, after, description, at, project, null);
+    }
+
+    @SuppressWarnings("java:S107")
+    private static Object[] row(UUID tenant, String requestId, String type, BigDecimal amount, BigDecimal after,
+                                String description, Instant at, UUID project, Attr attr) {
         return new Object[]{UUID.randomUUID(), tenant, requestId, type, CostCalculator.normalize(amount),
-                CostCalculator.normalize(after), description, Timestamp.from(at), project};
+                CostCalculator.normalize(after), description, Timestamp.from(at), project,
+                attr == null ? null : attr.apiKey(), attr == null ? null : attr.endUser(), attr == null ? null : attr.session()};
+    }
+
+    static final String SPIKE_SESSION = "agent-research-7f3a";
+    static final int SPIKE_MAX_STEPS = 60;
+    static final int SPIKE_BLOCKED = 23;
+
+    /**
+     * Picks the caller attribution of one seeded request: 75 % through the demo API key, a weighted end user, feature /
+     * env / team tags, and about 40 % of requests as steps of short agent sessions (3-12 calls, gaps under 20 min).
+     */
+    private static Attr attribution(UUID t, ProjectSeed project, Instant at, UUID demoKey, Map<String, OpenSession> sessions,
+                                    Random rnd) {
+        Audience a = AUDIENCES.get(t);
+        String user = a.users().get(Math.min(a.users().size() - 1, (int) Math.floor(Math.pow(rnd.nextDouble(), 1.8) * a.users().size())));
+        StringBuilder tags = new StringBuilder("{\"env\":\"").append(rnd.nextDouble() < 0.9 ? "prod" : "staging").append("\"");
+        if (project != null && a.features().containsKey(project.name())) {
+            tags.append(",\"feature\":\"").append(a.features().get(project.name())).append("\"");
+        }
+        tags.append(",\"team\":\"").append(a.team()).append("\"}");
+        String session = null;
+        OpenSession open = sessions.get(user);
+        if (open != null && open.stepsLeft > 0 && Duration.between(open.last, at).compareTo(Duration.ofMinutes(20)) < 0) {
+            open.stepsLeft--;
+            open.last = at;
+            session = open.id;
+        } else if (rnd.nextDouble() < 0.4) {
+            OpenSession s = new OpenSession();
+            s.id = "sess_" + Long.toHexString(rnd.nextLong() & 0xffffffffffL);
+            s.stepsLeft = 2 + rnd.nextInt(10);
+            s.last = at;
+            sessions.put(user, s);
+            session = s.id;
+        }
+        boolean anonymous = rnd.nextDouble() < 0.12;
+        return new Attr(rnd.nextDouble() < 0.75 ? demoKey : null, anonymous ? null : user, anonymous ? null : session, tags.toString());
+    }
+
+    /** Workspace caps of the demo tenants, and the block the runaway agent ran into once it hit the step limit. */
+    private void seedCostControls(UUID t, int spikeSteps, Instant now) {
+        if (t.equals(VORTEX)) {
+            jdbc.update("""
+                    update tenants set end_user_daily_cap_usd = 2.00, session_cap_usd = 1.50, session_max_requests = ?,
+                        downgrade_at_pct = 90, downgrade_model = 'gpt-4o-mini' where id = ?""", SPIKE_MAX_STEPS, t);
+            if (spikeSteps == SPIKE_MAX_STEPS) {
+                Instant first = now.minus(Duration.ofHours(5)).truncatedTo(ChronoUnit.HOURS).plus(Duration.ofMinutes(55));
+                jdbc.update("""
+                        insert into cost_control_events (tenant_id, kind, scope_key, period, limit_value, observed_value,
+                            blocked_count, last_request_id, first_at, last_at)
+                        values (?, 'SESSION_STEPS', ?, 'session', ?, ?, ?, 'req_seed_agent_blocked', ?, ?)""",
+                        t, SPIKE_SESSION, SPIKE_MAX_STEPS, SPIKE_MAX_STEPS + 1, SPIKE_BLOCKED, Timestamp.from(first),
+                        Timestamp.from(first.plus(Duration.ofMinutes(9))));
+            }
+        } else if (t.equals(HELIX)) {
+            jdbc.update("""
+                    update tenants set end_user_daily_cap_usd = 0.50, session_cap_usd = 0.50, session_max_requests = 40,
+                        downgrade_at_pct = null, downgrade_model = null where id = ?""", t);
+        } else {
+            jdbc.update("""
+                    update tenants set end_user_daily_cap_usd = 0.10, session_cap_usd = null, session_max_requests = 25,
+                        downgrade_at_pct = null, downgrade_model = null where id = ?""", t);
+        }
     }
 
     @SuppressWarnings("java:S107")
     private static Object[] log(UUID tenant, String requestId, UUID project, String provider, String model, int prompt,
                                 int completion, BigDecimal cost, BigDecimal saved, int latency, int ttft, String cache,
-                                boolean failover, int status, Instant at) {
+                                boolean failover, int status, Instant at, Attr attr) {
         return new Object[]{UUID.randomUUID(), tenant, requestId, project, provider, model, prompt, completion,
                 CostCalculator.normalize(cost), CostCalculator.normalize(saved), latency, ttft, cache, failover, status,
-                Timestamp.from(at)};
+                Timestamp.from(at), attr.apiKey(), attr.endUser(), attr.session(), attr.tagsJson()};
     }
 }

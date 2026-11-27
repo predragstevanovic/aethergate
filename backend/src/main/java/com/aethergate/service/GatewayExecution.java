@@ -16,6 +16,11 @@ public interface GatewayExecution {
 
     RateLimiterService.Usage rateLimitUsage();
 
+    /** The cheaper model the soft budget limit routed this request to first, or null (normal routing). */
+    default String downgradedTo() {
+        return null;
+    }
+
     /** Streams the completion into {@code sink} and settles the ledger. Blocks until done. */
     CompletionOutcome run(TokenSink sink);
 }

@@ -74,7 +74,8 @@ public class TenantDirectoryService {
                 .flatMap(key -> tenants.findById(key.getTenantId())
                         .map(t -> GatewayPrincipal.forApiKey(t.getId(), t.getName(), key.getId(), key.getKeyPrefix(),
                                 key.getRateLimitRpm(), key.getRateLimitTpm(), key.getProjectId())
-                                .withPolicy(KeyPolicy.of(key.getExpiresAt(), key.getAllowedModels(), key.getIpAllowlist()))))));
+                                .withPolicy(KeyPolicy.of(key.getExpiresAt(), key.getAllowedModels(), key.getIpAllowlist(),
+                                        key.getMonthlyBudgetUsd()))))));
     }
 
     /** Returns the user's default workspace, creating one (with welcome credit and default routing) on first login. */

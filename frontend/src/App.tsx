@@ -15,6 +15,10 @@ const ProjectsPage = lazy(() => import('./pages/ProjectsPage').then((m) => ({ de
 const TeamPage = lazy(() => import('./pages/TeamPage').then((m) => ({ default: m.TeamPage })))
 const AlertsPage = lazy(() => import('./pages/AlertsPage').then((m) => ({ default: m.AlertsPage })))
 const PromptsPage = lazy(() => import('./pages/PromptsPage').then((m) => ({ default: m.PromptsPage })))
+const FinOpsPage = lazy(() => import('./pages/FinOpsPage').then((m) => ({ default: m.FinOpsPage })))
+const CostAllocationPage = lazy(() => import('./pages/CostAllocationPage').then((m) => ({ default: m.CostAllocationPage })))
+const SessionsPage = lazy(() => import('./pages/SessionsPage').then((m) => ({ default: m.SessionsPage })))
+const RequestsPage = lazy(() => import('./pages/RequestsPage').then((m) => ({ default: m.RequestsPage })))
 const ApiKeysRoutingPage = lazy(() => import('./pages/ApiKeysRoutingPage').then((m) => ({ default: m.ApiKeysRoutingPage })))
 
 function PageFallback() {
@@ -57,6 +61,10 @@ const router = createBrowserRouter([
           { path: '/', element: page(<OverviewPage />) },
           { path: '/playground', element: page(<PlaygroundChaosPage />) },
           { path: '/ledger', element: page(<LedgerAuditPage />) },
+          { path: '/finops', element: page(<FinOpsPage />) },
+          { path: '/allocation', element: page(<CostAllocationPage />) },
+          { path: '/sessions', element: page(<SessionsPage />) },
+          { path: '/requests', element: page(<RequestsPage />) },
           { path: '/projects', element: page(<ProjectsPage />) },
           { path: '/guardrails', element: page(<GuardrailsPage />) },
           { path: '/settings', element: page(<ApiKeysRoutingPage />) },

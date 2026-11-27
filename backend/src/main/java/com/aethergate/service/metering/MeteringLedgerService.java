@@ -54,12 +54,22 @@ public class MeteringLedgerService {
 
     @TenantScoped
     public Reservation reserveBudget(String requestId, BigDecimal estimatedMaxCost, String description) {
-        return reserveBudget(requestId, estimatedMaxCost, description, null);
+        return reserveBudget(requestId, estimatedMaxCost, description, HoldScope.NONE);
     }
 
     @TenantScoped
     public Reservation reserveBudget(String requestId, BigDecimal estimatedMaxCost, String description, UUID projectId) {
+        return reserveBudget(requestId, estimatedMaxCost, description, HoldScope.project(projectId));
+    }
+
+    /**
+     * Places the hold after checking, under the tenant row lock: balance, workspace hard limit, project budget, the
+     * API key's monthly budget, the end user's daily cap and the agent session's cost and step limits.
+     */
+    @TenantScoped
+    public Reservation reserveBudget(String requestId, BigDecimal estimatedMaxCost, String description, HoldScope scope) {
         BigDecimal amount = requirePositive(estimatedMaxCost);
+        HoldScope s = scope == null ? HoldScope.NONE : scope;
         UUID tenantId = TenantContext.require();
         Tenant tenant = lock(tenantId);
 
@@ -76,14 +86,78 @@ public class MeteringLedgerService {
         if (projected.compareTo(tenant.getHardBudgetLimitUsd()) > 0) {
             throw new BudgetLimitExceededException(tenant.getHardBudgetLimitUsd(), CostCalculator.normalize(projected));
         }
-        if (projectId != null) {
-            checkProjectBudget(tenantId, projectId, amount);
+        if (s.projectId() != null) {
+            checkProjectBudget(tenantId, s.projectId(), amount);
         }
+        checkSpendCaps(tenantId, tenant, s, amount);
 
         tenant.reserve(amount);
         ledger.save(new LedgerEntry(tenantId, requestId, EntryType.RESERVE, amount, tenant.getAvailableBalanceUsd(),
-                description, projectId));
+                description, s.projectId()).attributedTo(s.apiKeyId(), s.endUserId(), s.sessionId()));
         return new Reservation(requestId, amount, tenant.getAvailableBalanceUsd(), false);
+    }
+
+    /** Key, end-user and session caps. Settled spend plus holds in flight plus this hold must fit each cap. */
+    private void checkSpendCaps(UUID tenantId, Tenant tenant, HoldScope s, BigDecimal amount) {
+        if (s.apiKeyId() != null && s.keyMonthlyBudgetUsd() != null) {
+            BigDecimal used = ledger.sumKeySince(tenantId, s.apiKeyId(), EntryType.SETTLE, monthStart())
+                    .add(ledger.openKeyHolds(tenantId, s.apiKeyId())).add(amount);
+            if (used.compareTo(s.keyMonthlyBudgetUsd()) > 0) {
+                throw new SpendCapExceededException(SpendCapExceededException.Kind.KEY_MONTHLY_BUDGET, s.apiKeyId().toString(),
+                        CostCalculator.normalize(s.keyMonthlyBudgetUsd()), CostCalculator.normalize(used),
+                        "This API key's monthly budget of $" + plain(s.keyMonthlyBudgetUsd()) + " would be exceeded");
+            }
+        }
+        if (s.endUserId() != null && tenant.getEndUserDailyCapUsd() != null) {
+            BigDecimal used = ledger.sumEndUserSince(tenantId, s.endUserId(), EntryType.SETTLE, dayStart())
+                    .add(ledger.openEndUserHolds(tenantId, s.endUserId())).add(amount);
+            if (used.compareTo(tenant.getEndUserDailyCapUsd()) > 0) {
+                throw new SpendCapExceededException(SpendCapExceededException.Kind.END_USER_DAILY_CAP, s.endUserId(),
+                        CostCalculator.normalize(tenant.getEndUserDailyCapUsd()), CostCalculator.normalize(used),
+                        "End user '" + s.endUserId() + "' reached the daily cap of $" + plain(tenant.getEndUserDailyCapUsd())
+                                + " (resets at 00:00 UTC)");
+            }
+        }
+        if (s.sessionId() != null) {
+            checkSession(tenantId, tenant, s.sessionId(), amount);
+        }
+    }
+
+    private void checkSession(UUID tenantId, Tenant tenant, String sessionId, BigDecimal amount) {
+        Integer maxSteps = tenant.getSessionMaxRequests();
+        if (maxSteps != null) {
+            long steps = ledger.countSessionHolds(tenantId, sessionId);
+            if (steps >= maxSteps) {
+                throw new SpendCapExceededException(SpendCapExceededException.Kind.SESSION_STEPS, sessionId,
+                        BigDecimal.valueOf(maxSteps), BigDecimal.valueOf(steps + 1),
+                        "Session '" + sessionId + "' reached its limit of " + maxSteps
+                                + " model calls (runaway-agent guard); start a new session");
+            }
+        }
+        BigDecimal cap = tenant.getSessionCapUsd();
+        if (cap != null) {
+            BigDecimal used = ledger.sumSession(tenantId, sessionId, EntryType.SETTLE)
+                    .add(ledger.openSessionHolds(tenantId, sessionId)).add(amount);
+            if (used.compareTo(cap) > 0) {
+                throw new SpendCapExceededException(SpendCapExceededException.Kind.SESSION_BUDGET, sessionId,
+                        CostCalculator.normalize(cap), CostCalculator.normalize(used),
+                        "Session '" + sessionId + "' would exceed its budget of $" + plain(cap) + " (runaway-agent guard)");
+            }
+        }
+    }
+
+    /** Month-to-date settled spend per API key (for the keys table). */
+    @TenantScoped(readOnly = true)
+    public java.util.Map<UUID, BigDecimal> keySpendThisMonth() {
+        java.util.Map<UUID, BigDecimal> out = new java.util.HashMap<>();
+        for (Object[] row : ledger.sumByKeySince(TenantContext.require(), EntryType.SETTLE, monthStart())) {
+            out.put((UUID) row[0], (BigDecimal) row[1]);
+        }
+        return out;
+    }
+
+    private static String plain(BigDecimal v) {
+        return v.stripTrailingZeros().toPlainString();
     }
 
     /**
@@ -112,9 +186,11 @@ public class MeteringLedgerService {
         BigDecimal availableBeforeRelease = tenant.getAvailableBalanceUsd();
         tenant.clearReservation(reserved, released);
         UUID projectId = reserve.getProjectId(); // SETTLE/RELEASE are charged to the project that took the hold
-        ledger.save(new LedgerEntry(tenantId, requestId, EntryType.SETTLE, settled, availableBeforeRelease, description, projectId));
+        ledger.save(new LedgerEntry(tenantId, requestId, EntryType.SETTLE, settled, availableBeforeRelease, description, projectId)
+                .attributedTo(reserve.getApiKeyId(), reserve.getEndUserId(), reserve.getSessionId()));
         ledger.save(new LedgerEntry(tenantId, requestId, EntryType.RELEASE, released, tenant.getAvailableBalanceUsd(),
-                "Unused hold returned", projectId));
+                "Unused hold returned", projectId)
+                .attributedTo(reserve.getApiKeyId(), reserve.getEndUserId(), reserve.getSessionId()));
         return new Settlement(requestId, reserved, settled, released, tenant.getAvailableBalanceUsd(), false);
     }
 
@@ -132,7 +208,7 @@ public class MeteringLedgerService {
         BigDecimal reserved = reserve.getAmountUsd();
         tenant.clearReservation(reserved, reserved);
         ledger.save(new LedgerEntry(tenantId, requestId, EntryType.RELEASE, reserved, tenant.getAvailableBalanceUsd(), reason,
-                reserve.getProjectId()));
+                reserve.getProjectId()).attributedTo(reserve.getApiKeyId(), reserve.getEndUserId(), reserve.getSessionId()));
         return new Settlement(requestId, reserved, BigDecimal.ZERO.setScale(CostCalculator.SCALE), reserved,
                 tenant.getAvailableBalanceUsd(), false);
     }
@@ -171,6 +247,10 @@ public class MeteringLedgerService {
     private Tenant lock(UUID tenantId) {
         return tenants.findByIdForUpdate(tenantId)
                 .orElseThrow(() -> new IllegalStateException("Tenant not visible in current context: " + tenantId));
+    }
+
+    private Instant dayStart() {
+        return LocalDate.now(clock.withZone(ZoneOffset.UTC)).atStartOfDay(ZoneOffset.UTC).toInstant();
     }
 
     private Instant monthStart() {

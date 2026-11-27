@@ -13,11 +13,17 @@ public final class AdminViews {
     /** {@code status}: ACTIVE, EXPIRED (past expires_at, e.g. after a rotation grace period) or REVOKED. */
     public record ApiKeyView(UUID id, String name, String keyPrefix, int rateLimitRpm, int rateLimitTpm, boolean active,
                              Instant lastUsedAt, Instant createdAt, UUID projectId, String status, Instant expiresAt,
-                             List<String> allowedModels, List<String> ipAllowlist, UUID rotatedFrom, long version) {}
+                             List<String> allowedModels, List<String> ipAllowlist, UUID rotatedFrom, long version,
+                             BigDecimal monthlyBudgetUsd, BigDecimal monthToDateUsd) {}
 
     /** Replacement for a key's limits and restrictions (PUT, If-Match). Empty lists = no restriction. */
     public record KeyPolicyDraft(String name, int rateLimitRpm, int rateLimitTpm, Instant expiresAt, List<String> allowedModels,
-                                 List<String> ipAllowlist) {}
+                                 List<String> ipAllowlist, BigDecimal monthlyBudgetUsd) {
+        public KeyPolicyDraft(String name, int rateLimitRpm, int rateLimitTpm, Instant expiresAt, List<String> allowedModels,
+                              List<String> ipAllowlist) {
+            this(name, rateLimitRpm, rateLimitTpm, expiresAt, allowedModels, ipAllowlist, null);
+        }
+    }
 
     /** Rotation result: the new key (raw secret shown once) and the old key with its grace expiry. */
     public record RotatedApiKey(ApiKeyView key, String rawKey, ApiKeyView previous) {}

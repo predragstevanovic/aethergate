@@ -3,6 +3,7 @@ package com.aethergate.web;
 import com.aethergate.service.CompletionCommand;
 import com.aethergate.service.GatewayExecution;
 import com.aethergate.service.GatewayOrchestratorService;
+import com.aethergate.service.RequestAttribution;
 import com.aethergate.service.llm.ChatMessage;
 import com.aethergate.service.llm.RouteTarget;
 import com.aethergate.service.TemplateRef;
@@ -50,6 +51,9 @@ public class GatewayController {
     public ResponseEntity<StreamingResponseBody> chatCompletions(@AuthenticationPrincipal GatewayPrincipal principal,
                                              @Valid @RequestBody ChatCompletionRequest request,
                                              @RequestHeader(value = "X-Simulate-Provider-Failure", required = false) String simulate,
+                                             @RequestHeader(value = "X-AetherGate-User", required = false) String userHeader,
+                                             @RequestHeader(value = "X-AetherGate-Session", required = false) String sessionHeader,
+                                             @RequestHeader(value = "X-AetherGate-Tags", required = false) String tagsHeader,
                                              HttpServletRequest http) {
         requireAllowedNetwork(principal, http);
         List<ChatMessage> messages = new ArrayList<>();
@@ -66,8 +70,10 @@ public class GatewayController {
         if (messages.isEmpty()) {
             throw new IllegalArgumentException("Provide messages or a prompt_template");
         }
+        RequestAttribution attribution = RequestAttribution.resolve(userHeader, sessionHeader, tagsHeader, request.user(),
+                request.metadata());
         GatewayExecution exec = orchestrator.prepare(new CompletionCommand(principal, request.model(), messages,
-                request.maxTokens(), "true".equalsIgnoreCase(simulate), template));
+                request.maxTokens(), "true".equalsIgnoreCase(simulate), template, attribution));
         String model = request.model() == null || request.model().isBlank() ? "auto" : request.model();
         return request.streaming() ? responder.stream(exec, model) : responder.complete(exec, model);
     }

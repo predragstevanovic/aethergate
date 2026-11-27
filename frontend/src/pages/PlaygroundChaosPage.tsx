@@ -32,6 +32,9 @@ export function PlaygroundChaosPage() {
   const [templateId, setTemplateId] = useState('')
   const [vars, setVars] = useState<Record<string, string>>({})
   const template = templates.find((t) => t.id === templateId) ?? null
+  const [endUser, setEndUser] = useState('')
+  const [sessionId, setSessionId] = useState('')
+  const [tags, setTags] = useState('')
 
   const run = useCallback(async (mode: Mode) => {
     const text = template ? `template:${template.name}` : (mode === 'resend' ? lastPrompt : prompt)?.trim()
@@ -43,9 +46,11 @@ export function PlaygroundChaosPage() {
     setError(null)
     setLastPrompt(text)
     await streamPlayground(
-      template
-        ? { template: { id: template.id, variables: vars }, max_tokens: 400, simulate_failure: mode === 'chaos', project_id: projectId || null }
-        : { prompt: text, max_tokens: 400, simulate_failure: mode === 'chaos', project_id: projectId || null },
+      {
+        ...(template ? { template: { id: template.id, variables: vars } } : { prompt: text }),
+        max_tokens: 400, simulate_failure: mode === 'chaos', project_id: projectId || null,
+        end_user: endUser.trim() || null, session_id: sessionId.trim() || null, tags: tags.trim() || null,
+      },
       {
         onDelta: (d) => setOutput((o) => o + d),
         onTelemetry: (t) => {
@@ -58,7 +63,7 @@ export function PlaygroundChaosPage() {
     )
     setStreaming(null)
     health.reload()
-  }, [prompt, lastPrompt, streaming, health, projectId, template, vars])
+  }, [prompt, lastPrompt, streaming, health, projectId, template, vars, endUser, sessionId, tags])
 
   const providers = health.data?.providers ?? []
   const primary = providers.find((p) => p.enabled)
@@ -84,6 +89,26 @@ export function PlaygroundChaosPage() {
           </select>
         </label>
         <span className="text-[12px] text-ink-3">Breaker: 4 failures · 30 s cool-down</span>
+      </div>
+
+      <div className="flex flex-wrap items-end gap-3 rounded-lg border border-line bg-panel px-5 py-3.5" aria-label="Attribution">
+        <span className="text-[12px] text-ink-3 self-center">Attribution</span>
+        <label className="text-[12px] text-ink-3 space-y-1">
+          <span className="block">End user</span>
+          <input className={`${inputClass} h-8 w-40 text-[13px] font-mono`} placeholder="acme-corp" value={endUser} onChange={(e) => setEndUser(e.target.value)} />
+        </label>
+        <label className="text-[12px] text-ink-3 space-y-1">
+          <span className="block">Agent session</span>
+          <span className="flex gap-1">
+            <input className={`${inputClass} h-8 w-44 text-[13px] font-mono`} placeholder="agent-run-1" value={sessionId} onChange={(e) => setSessionId(e.target.value)} />
+            <Button size="sm" variant="ghost" onClick={() => setSessionId(`run-${Math.random().toString(36).slice(2, 8)}`)}>New</Button>
+          </span>
+        </label>
+        <label className="text-[12px] text-ink-3 space-y-1">
+          <span className="block">Cost tags</span>
+          <input className={`${inputClass} h-8 w-56 text-[13px] font-mono`} placeholder="feature=search,env=prod" value={tags} onChange={(e) => setTags(e.target.value)} />
+        </label>
+        <span className="text-[12px] text-ink-3 max-w-sm">Same as the X-AetherGate-User / -Session / -Tags headers on /v1; caps from Settings → Cost controls apply.</span>
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[1fr_340px]">
@@ -176,6 +201,7 @@ export function PlaygroundChaosPage() {
                     {telemetry.failover_triggered && <Badge tone="warn">failover</Badge>}
                   </span>} />
                 <Row label="Model" value={<span className="font-mono text-[12px]">{telemetry.model}</span>} />
+                {telemetry.downgraded_to && <Row label="Soft limit" value={<Badge tone="warn">downgraded to {telemetry.downgraded_to}</Badge>} />}
                 <Row label="Cache status" value={<Badge tone={telemetry.cache_status === 'HIT' ? 'good' : 'neutral'}>{telemetry.cache_status}</Badge>} />
                 {telemetry.redactions > 0 && <Row label="Guardrail redactions" value={<Badge tone="warn">{telemetry.redactions} masked</Badge>} />}
                 {telemetry.cache_similarity != null && <Row label="Similarity" value={<span className="font-mono num">{telemetry.cache_similarity.toFixed(4)}</span>} />}

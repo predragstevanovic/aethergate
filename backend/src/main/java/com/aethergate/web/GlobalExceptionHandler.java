@@ -63,6 +63,16 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         return p;
     }
 
+    @ExceptionHandler(com.aethergate.service.metering.SpendCapExceededException.class)
+    ProblemDetail spendCap(com.aethergate.service.metering.SpendCapExceededException e, HttpServletRequest req) {
+        ProblemDetail p = problem(HttpStatus.valueOf(e.getKind().status()), e.getKind().problemType(), e.getMessage(), req);
+        p.setProperty("cap", e.getKind().name());
+        p.setProperty("scope", e.getScopeKey());
+        p.setProperty("limit", e.getLimit());
+        p.setProperty("projected", e.getObserved());
+        return p;
+    }
+
     @ExceptionHandler(GuardrailBlockedException.class)
     ProblemDetail guardrailBlocked(GuardrailBlockedException e, HttpServletRequest req) {
         ProblemDetail p = problem(HttpStatus.UNPROCESSABLE_ENTITY, "guardrail-blocked", e.getMessage(), req);

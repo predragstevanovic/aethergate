@@ -15,11 +15,18 @@ public record ChatCompletionRequest(
         @Min(1) @Max(4096) Integer maxTokens,
         Boolean stream,
         Double temperature,
-        @Valid TemplateInvocation promptTemplate) {
+        @Valid TemplateInvocation promptTemplate,
+        @Size(max = 128) String user,
+        @Size(max = 16) java.util.Map<String, String> metadata) {
 
     public record Message(
             @NotBlank @Pattern(regexp = "system|user|assistant") String role,
             @NotBlank @Size(max = 32_000) String content) {}
+
+    public ChatCompletionRequest(String model, List<Message> messages, Integer maxTokens, Boolean stream, Double temperature,
+                                 TemplateInvocation promptTemplate) {
+        this(model, messages, maxTokens, stream, temperature, promptTemplate, null, null);
+    }
 
     public boolean streaming() {
         return Boolean.TRUE.equals(stream);

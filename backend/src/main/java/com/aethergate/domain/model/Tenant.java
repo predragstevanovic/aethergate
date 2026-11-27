@@ -40,6 +40,21 @@ public class Tenant extends AssignedIdEntity {
     @Column(name = "is_demo", nullable = false)
     private boolean demo;
 
+    @Column(name = "end_user_daily_cap_usd", precision = 19, scale = 8)
+    private BigDecimal endUserDailyCapUsd;
+
+    @Column(name = "session_cap_usd", precision = 19, scale = 8)
+    private BigDecimal sessionCapUsd;
+
+    @Column(name = "session_max_requests")
+    private Integer sessionMaxRequests;
+
+    @Column(name = "downgrade_at_pct")
+    private Integer downgradeAtPct;
+
+    @Column(name = "downgrade_model", length = 80)
+    private String downgradeModel;
+
     @Version
     private long version;
 
@@ -82,6 +97,16 @@ public class Tenant extends AssignedIdEntity {
         this.hardBudgetLimitUsd = newHardBudgetLimit;
     }
 
+    /** Spend caps and the soft-limit downgrade. Null = off. The caller holds the row lock. */
+    public void updateCostControls(BigDecimal userDailyCap, BigDecimal sessionCap, Integer sessionMaxSteps,
+                                   Integer downgradePct, String downgradeTo) {
+        this.endUserDailyCapUsd = userDailyCap;
+        this.sessionCapUsd = sessionCap;
+        this.sessionMaxRequests = sessionMaxSteps;
+        this.downgradeAtPct = downgradePct;
+        this.downgradeModel = downgradeTo;
+    }
+
     @Override
     public UUID getId() { return id; }
     public UUID getOwnerUserId() { return ownerUserId; }
@@ -93,4 +118,9 @@ public class Tenant extends AssignedIdEntity {
     public BigDecimal getHardBudgetLimitUsd() { return hardBudgetLimitUsd; }
     public boolean isDemo() { return demo; }
     public Instant getCreatedAt() { return createdAt; }
+    public BigDecimal getEndUserDailyCapUsd() { return endUserDailyCapUsd; }
+    public BigDecimal getSessionCapUsd() { return sessionCapUsd; }
+    public Integer getSessionMaxRequests() { return sessionMaxRequests; }
+    public Integer getDowngradeAtPct() { return downgradeAtPct; }
+    public String getDowngradeModel() { return downgradeModel; }
 }

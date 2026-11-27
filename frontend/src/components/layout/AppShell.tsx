@@ -1,4 +1,4 @@
-import { BellRing, FlaskConical, FolderKanban, Gauge, KeyRound, LibraryBig, LogOut, Moon, ScrollText, ShieldCheck, Sun, Users, X } from 'lucide-react'
+import { BellRing, Bot, FlaskConical, FolderKanban, Gauge, KeyRound, LibraryBig, ListFilter, LogOut, Moon, PieChart, ScrollText, ShieldCheck, Sun, TrendingUp, Users, X } from 'lucide-react'
 import { useState } from 'react'
 import { label } from '../../hooks/useRole'
 import { NavLink, Outlet } from 'react-router'
@@ -12,6 +12,10 @@ const NAV = [
   { to: '/', label: 'Overview', icon: Gauge, end: true },
   { to: '/playground', label: 'Playground', icon: FlaskConical },
   { to: '/ledger', label: 'Ledger', icon: ScrollText },
+  { to: '/finops', label: 'FinOps', icon: TrendingUp },
+  { to: '/allocation', label: 'Cost allocation', icon: PieChart },
+  { to: '/sessions', label: 'Sessions', icon: Bot },
+  { to: '/requests', label: 'Requests', icon: ListFilter },
   { to: '/projects', label: 'Projects', icon: FolderKanban },
   { to: '/guardrails', label: 'Guardrails', icon: ShieldCheck },
   { to: '/prompts', label: 'Prompts', icon: LibraryBig },

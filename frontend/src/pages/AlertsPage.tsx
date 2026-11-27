@@ -12,6 +12,8 @@ const EVENT_HINT: Record<string, string> = {
   'guardrail.blocked': 'A prompt was blocked by a guardrail (the prompt itself is never sent)',
   'api_key.rotated': 'An API key was rotated (old and new prefixes, grace expiry)',
   'member.joined': 'Someone accepted an invitation',
+  'spend_cap.reached': 'A key budget, end-user daily cap or session limit blocked its first request of the period',
+  'cost.anomaly_detected': 'An hour\'s spend was far above the workspace\'s weekly baseline (once per hour)',
 }
 
 export function AlertsPage() {

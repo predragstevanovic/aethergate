@@ -132,7 +132,8 @@ public class SecurityConfig {
         cfg.setAllowedOriginPatterns(props.cors().allowedOrigins().stream().map(String::trim).filter(s -> !s.isEmpty()).distinct().toList());
         cfg.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
         cfg.setAllowedHeaders(List.of("Authorization", "Content-Type", "X-Simulate-Provider-Failure", "If-Match", "X-Workspace-Id"));
-        cfg.setExposedHeaders(List.of("X-Request-Id", "X-Cache", "Retry-After", "ETag", "Location"));
+        cfg.setExposedHeaders(List.of("X-Request-Id", "X-Cache", "Retry-After", "ETag", "Location", "Content-Disposition",
+                "X-AetherGate-Rows", "X-AetherGate-Billed-Cost", "X-AetherGate-Downgraded-To"));
         cfg.setMaxAge(3600L);
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/**", cfg);
@@ -144,9 +145,10 @@ public class SecurityConfig {
         CorsConfiguration cfg = new CorsConfiguration();
         cfg.setAllowedOriginPatterns(List.of("*"));
         cfg.setAllowedMethods(List.of("GET", "POST", "OPTIONS"));
-        cfg.setAllowedHeaders(List.of("Authorization", "Content-Type", "X-API-Key", "X-Simulate-Provider-Failure"));
+        cfg.setAllowedHeaders(List.of("Authorization", "Content-Type", "X-API-Key", "X-Simulate-Provider-Failure", "X-AetherGate-User",
+                "X-AetherGate-Session", "X-AetherGate-Tags"));
         cfg.setExposedHeaders(List.of("X-Request-Id", "X-Cache", "Retry-After", "X-RateLimit-Remaining-Requests",
-                "X-RateLimit-Remaining-Tokens"));
+                "X-RateLimit-Remaining-Tokens", "X-AetherGate-Downgraded-To"));
         cfg.setAllowCredentials(false);
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/**", cfg);

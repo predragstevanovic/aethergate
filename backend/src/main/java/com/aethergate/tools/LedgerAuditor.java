@@ -114,6 +114,18 @@ public class LedgerAuditor {
                 select count(*) from (select rule_id, period from alert_firings group by rule_id, period having count(*) > 1) x""",
                 Integer.class);
         checks.add(new Check("Budget alerts fired at most once per rule and month", doubleFired == 0, doubleFired + " duplicates"));
+        Integer attributionDrift = jdbc.queryForObject("""
+                select count(*) from llm_request_logs l
+                join ledger_entries e on e.tenant_id = l.tenant_id and e.request_id = l.request_id
+                where e.api_key_id is distinct from l.api_key_id or e.end_user_id is distinct from l.end_user_id
+                   or e.session_id is distinct from l.session_id""", Integer.class);
+        checks.add(new Check("Attribution: ledger lines carry the request's API key, end user and session",
+                attributionDrift == 0, attributionDrift + " ledger lines disagree with their request"));
+        Integer doubleAnomaly = jdbc.queryForObject("""
+                select count(*) from (select tenant_id, bucket_start from cost_anomalies group by 1, 2 having count(*) > 1) x""",
+                Integer.class);
+        checks.add(new Check("Cost anomalies recorded at most once per tenant and hour", doubleAnomaly == 0,
+                doubleAnomaly + " duplicates"));
         checks.add(rlsCheck());
         checks.add(immutabilityCheck());
 
@@ -143,7 +155,7 @@ public class LedgerAuditor {
             for (String table : List.of("ledger_entries", "llm_request_logs", "semantic_cache", "api_keys", "provider_configs",
                     "rate_limit_windows", "projects", "guardrail_rules", "guardrail_events", "tenant_members", "audit_events",
                     "webhook_endpoints", "webhook_deliveries", "alert_rules", "alert_firings", "prompt_templates",
-                    "prompt_template_versions")) {
+                    "prompt_template_versions", "cost_control_events", "cost_anomalies")) {
                 total += jdbc.queryForObject("select count(*) from " + table + " where tenant_id <> ?", Long.class, a);
             }
             total += jdbc.queryForObject("select count(*) from tenants where id <> ?", Long.class, a);

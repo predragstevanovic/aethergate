@@ -42,6 +42,15 @@ public class LedgerEntry extends AssignedIdEntity {
     @Column(length = 255, updatable = false)
     private String description;
 
+    @Column(name = "api_key_id", updatable = false)
+    private UUID apiKeyId;
+
+    @Column(name = "end_user_id", length = 128, updatable = false)
+    private String endUserId;
+
+    @Column(name = "session_id", length = 128, updatable = false)
+    private String sessionId;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -66,6 +75,14 @@ public class LedgerEntry extends AssignedIdEntity {
         this.createdAt = Instant.now();
     }
 
+    /** The same line, also charged to an API key, end user and agent session (any may be null). */
+    public LedgerEntry attributedTo(UUID key, String endUser, String session) {
+        this.apiKeyId = key;
+        this.endUserId = endUser;
+        this.sessionId = session;
+        return this;
+    }
+
     @Override
     public UUID getId() { return id; }
     public UUID getTenantId() { return tenantId; }
@@ -75,5 +92,8 @@ public class LedgerEntry extends AssignedIdEntity {
     public BigDecimal getBalanceAfterUsd() { return balanceAfterUsd; }
     public String getDescription() { return description; }
     public UUID getProjectId() { return projectId; }
+    public UUID getApiKeyId() { return apiKeyId; }
+    public String getEndUserId() { return endUserId; }
+    public String getSessionId() { return sessionId; }
     public Instant getCreatedAt() { return createdAt; }
 }

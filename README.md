@@ -25,6 +25,17 @@ Row-Level Security.
 - **Budget alerts + signed webhooks** — "tell me at 80 %" fires exactly once per month (decided by a unique index), delivered through a transactional outbox with `SKIP LOCKED` leases, Stripe-style HMAC signatures, exponential-backoff retries and SSRF protection re-checked on every send.
 - **API key policies** — expiry, model allow-list (routing and holds only over allowed models), CIDR IP allow-list, and zero-downtime rotation with a grace period.
 - **Prompt library** — versioned `{{variable}}` templates; versions are immutable (DB trigger), Admins publish/roll back, and every request records its version so cost and latency compare per version. Callable from any OpenAI SDK via `prompt_template`.
+- **FinOps for AI spend (10 features, V8)** — → [explained](docs/FINOPS_FEATURES_EXPLAINED.md)
+  1. **Cost attribution tags** (`X-AetherGate-Tags` / OpenAI `metadata`) with showback by project, model, provider, key, end user or any tag, plus tag-coverage KPI.
+  2. **End-user analytics + daily caps** (`X-AetherGate-User` / OpenAI `user`) → `402 end-user-cap-exceeded`.
+  3. **Agent session tracing** (`X-AetherGate-Session`): cost, steps, models and a per-step timeline per agent run.
+  4. **Runaway-agent guard**: per-session budget (`402`) and step limit (`429 session-step-limit`).
+  5. **API key monthly budgets** enforced under the tenant lock (`402 key-budget-exceeded`).
+  6. **Budget-aware model downgrade** (soft limit): past N % of the limit the cheaper model answers first (`X-AetherGate-Downgraded-To`).
+  7. **Spend forecast**: month-end projection with an 80 % band, limit date, credit runway, per-project outlook.
+  8. **Cost anomaly detection**: robust z-score (median + MAD) on hourly spend, exactly-once `cost.anomaly_detected` webhook.
+  9. **Savings advisor**: right-sizing, prompt bloat, cache, reliability and governance recommendations with $ estimates from real tokens.
+  10. **FOCUS 1.2 export + request explorer**: FinOps-standard CSV whose BilledCost equals the ledger, and a filterable per-request explorer.
 - **Tenant self-service CRUD** — model catalog (add / reprice / remove, next hold uses the new price), workspace name + monthly limit (never below committed spend, under the metering row lock), keys moved between projects.
 - **Exact money** — `NUMERIC(19,8)` / `BigDecimal` end to end, sent to the browser as decimal strings.
 - **Semantic cache** — 384-dim embeddings computed offline in Java, HNSW cosine search, ≥ 0.96 similarity → replay in milliseconds at $0, strictly per tenant.
@@ -41,6 +52,14 @@ curl https://<api-host>/v1/chat/completions \
   -H "Authorization: Bearer ag_live_demo_vortex_5c1e8a2f9b7d4630" \
   -H "Content-Type: application/json" \
   -d '{"model":"auto","stream":true,"messages":[{"role":"user","content":"How does the metering ledger reserve budget?"}]}'
+```
+
+Attribute a request to an end user, an agent run and cost tags (all optional):
+
+```bash
+curl https://<api-host>/v1/chat/completions -H "Authorization: Bearer ag_live_demo_vortex_5c1e8a2f9b7d4630" \
+  -H "X-AetherGate-User: acme-corp" -H "X-AetherGate-Session: agent-run-42" -H "X-AetherGate-Tags: feature=search,env=prod" \
+  -H "Content-Type: application/json" -d '{"model":"auto","messages":[{"role":"user","content":"Summarise the ledger design"}]}'
 ```
 
 Public sandbox keys (demo tenants, only SHA-256 hashes are stored): `ag_live_demo_vortex_5c1e8a2f9b7d4630` (Vortex AI Labs) · `ag_live_demo_helix_0d93b6e1a47c2f58` (Helix Robotics).

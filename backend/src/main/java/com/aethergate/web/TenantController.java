@@ -95,7 +95,7 @@ public class TenantController {
         long expected = IfMatch.parse(ifMatch);
         ApiKeyView v = TenantContext.callAs(currentTenant.of(jwt).id(), () -> admin.updatePolicy(id, expected,
                 new KeyPolicyDraft(body.name(), body.rateLimitRpm(), body.rateLimitTpm(), body.expiresAt(),
-                        body.allowedModels(), body.ipAllowlist())));
+                        body.allowedModels(), body.ipAllowlist(), body.monthlyBudgetUsd())));
         return ResponseEntity.ok().eTag(IfMatch.etag(v.version())).body(v);
     }
 

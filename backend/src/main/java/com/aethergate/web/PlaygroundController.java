@@ -10,6 +10,7 @@ import com.aethergate.config.AetherGateProperties;
 import com.aethergate.service.CompletionCommand;
 import com.aethergate.service.GatewayExecution;
 import com.aethergate.service.GatewayOrchestratorService;
+import com.aethergate.service.RequestAttribution;
 import com.aethergate.service.llm.ChatMessage;
 import com.aethergate.service.tenant.GatewayPrincipal;
 import com.aethergate.service.tenant.TenantRef;
@@ -77,8 +78,9 @@ public class PlaygroundController {
             }
             messages.add(new ChatMessage("user", body.prompt()));
         }
+        RequestAttribution attribution = RequestAttribution.resolve(body.endUser(), body.sessionId(), body.tags(), null, null);
         GatewayExecution exec = orchestrator.prepare(new CompletionCommand(principal, "auto", messages, body.maxTokens(),
-                body.simulateFailure(), template));
+                body.simulateFailure(), template, attribution));
         return responder.stream(exec, "auto");
     }
 }

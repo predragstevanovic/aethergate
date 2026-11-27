@@ -59,6 +59,10 @@ public class ApiKey extends AssignedIdEntity {
     @Column(name = "rotated_from")
     private UUID rotatedFrom;
 
+    /** Monthly spend cap for this key alone; null = only the project / workspace limits apply. */
+    @Column(name = "monthly_budget_usd", precision = 19, scale = 8)
+    private java.math.BigDecimal monthlyBudgetUsd;
+
     @Version
     private long version;
 
@@ -92,7 +96,9 @@ public class ApiKey extends AssignedIdEntity {
 
     /** Replaces the key's limits and restrictions (name included); the secret itself never changes. */
     @SuppressWarnings("java:S107")
-    public void updatePolicy(String newName, int rpm, int tpm, Instant newExpiresAt, String models, String ips) {
+    public void updatePolicy(String newName, int rpm, int tpm, Instant newExpiresAt, String models, String ips,
+                             java.math.BigDecimal monthlyBudget) {
+        this.monthlyBudgetUsd = monthlyBudget;
         this.name = newName;
         this.rateLimitRpm = rpm;
         this.rateLimitTpm = tpm;
@@ -106,6 +112,7 @@ public class ApiKey extends AssignedIdEntity {
         ApiKey next = new ApiKey(tenantId, name, keyPrefix, keyHash, rateLimitRpm, rateLimitTpm, projectId);
         next.allowedModels = allowedModels;
         next.ipAllowlist = ipAllowlist;
+        next.monthlyBudgetUsd = monthlyBudgetUsd;
         next.rotatedFrom = id;
         return next;
     }
@@ -133,5 +140,6 @@ public class ApiKey extends AssignedIdEntity {
     public String getAllowedModels() { return allowedModels; }
     public String getIpAllowlist() { return ipAllowlist; }
     public UUID getRotatedFrom() { return rotatedFrom; }
+    public java.math.BigDecimal getMonthlyBudgetUsd() { return monthlyBudgetUsd; }
     public long getVersion() { return version; }
 }

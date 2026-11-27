@@ -7,7 +7,11 @@ import jakarta.persistence.Table;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.UUID;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import org.hibernate.annotations.Immutable;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 @Entity
 @Immutable
@@ -71,6 +75,24 @@ public class LlmRequestLog extends AssignedIdEntity {
     @Column(name = "template_version")
     private Integer templateVersion;
 
+    @Column(name = "end_user_id", length = 128)
+    private String endUserId;
+
+    @Column(name = "session_id", length = 128)
+    private String sessionId;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "tags", nullable = false, columnDefinition = "jsonb")
+    private Map<String, String> tags = new LinkedHashMap<>();
+
+    /** The model the caller asked for ("auto" when it let the chain decide). */
+    @Column(name = "requested_model", length = 80)
+    private String requestedModel;
+
+    /** Why the answering model was chosen when it is not the chain's primary: DOWNGRADE (soft budget limit). */
+    @Column(name = "routing_reason", length = 24)
+    private String routingReason;
+
     protected LlmRequestLog() {}
 
     @SuppressWarnings("java:S107") // a log row is inherently wide
@@ -103,6 +125,20 @@ public class LlmRequestLog extends AssignedIdEntity {
         return this;
     }
 
+    /** End user, agent session and cost tags of the request (see {@code RequestAttribution}). */
+    public LlmRequestLog withAttribution(String endUser, String session, Map<String, String> requestTags) {
+        this.endUserId = endUser;
+        this.sessionId = session;
+        this.tags = requestTags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(requestTags);
+        return this;
+    }
+
+    public LlmRequestLog withRouting(String requested, String reason) {
+        this.requestedModel = requested;
+        this.routingReason = reason;
+        return this;
+    }
+
     @Override
     public UUID getId() { return id; }
     public UUID getTenantId() { return tenantId; }
@@ -123,4 +159,9 @@ public class LlmRequestLog extends AssignedIdEntity {
     public Instant getCreatedAt() { return createdAt; }
     public UUID getTemplateId() { return templateId; }
     public Integer getTemplateVersion() { return templateVersion; }
+    public String getEndUserId() { return endUserId; }
+    public String getSessionId() { return sessionId; }
+    public Map<String, String> getTags() { return Map.copyOf(tags); }
+    public String getRequestedModel() { return requestedModel; }
+    public String getRoutingReason() { return routingReason; }
 }

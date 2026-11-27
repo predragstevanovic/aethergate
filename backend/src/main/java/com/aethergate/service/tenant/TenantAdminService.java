@@ -83,7 +83,9 @@ public class TenantAdminService {
 
     @TenantScoped(readOnly = true)
     public List<ApiKeyView> listKeys() {
-        return apiKeys.findAllByOrderByCreatedAtDesc().stream().map(this::view).toList();
+        Map<UUID, BigDecimal> mtd = ledger.keySpendThisMonth();
+        return apiKeys.findAllByOrderByCreatedAtDesc().stream()
+                .map(k -> view(k, CostCalculator.normalize(mtd.getOrDefault(k.getId(), BigDecimal.ZERO)))).toList();
     }
 
     @TenantScoped
@@ -139,7 +141,12 @@ public class TenantAdminService {
         if (d.expiresAt() != null && !d.expiresAt().isAfter(clock.instant())) {
             throw new IllegalArgumentException("Expiry must be in the future (revoke the key to stop it now)");
         }
-        key.updatePolicy(name, d.rateLimitRpm(), d.rateLimitTpm(), d.expiresAt(), models(d.allowedModels()), networks(d.ipAllowlist()));
+        if (d.monthlyBudgetUsd() != null && (d.monthlyBudgetUsd().signum() <= 0
+                || d.monthlyBudgetUsd().compareTo(WorkspaceService.MAX_LIMIT) > 0)) {
+            throw new IllegalArgumentException("A key's monthly budget must be between $0 and $1,000,000 (empty = no cap)");
+        }
+        key.updatePolicy(name, d.rateLimitRpm(), d.rateLimitTpm(), d.expiresAt(), models(d.allowedModels()), networks(d.ipAllowlist()),
+                d.monthlyBudgetUsd() == null ? null : CostCalculator.normalize(d.monthlyBudgetUsd()));
         apiKeys.saveAndFlush(key);
         directory.evictKey(key.getKeyHash());
         rateLimiter.invalidate(key.getId());
@@ -382,11 +389,16 @@ public class TenantAdminService {
     }
 
     private ApiKeyView view(ApiKey k) {
+        return view(k, null);
+    }
+
+    private ApiKeyView view(ApiKey k, BigDecimal monthToDate) {
         Instant now = clock.instant();
         String status = !k.isActive() ? "REVOKED" : k.getExpiresAt() != null && !now.isBefore(k.getExpiresAt()) ? "EXPIRED" : "ACTIVE";
         return new ApiKeyView(k.getId(), k.getName(), k.getKeyPrefix(), k.getRateLimitRpm(), k.getRateLimitTpm(),
                 k.isActive(), k.getLastUsedAt(), k.getCreatedAt(), k.getProjectId(), status, k.getExpiresAt(),
-                KeyPolicy.split(k.getAllowedModels()), KeyPolicy.split(k.getIpAllowlist()), k.getRotatedFrom(), k.getVersion());
+                KeyPolicy.split(k.getAllowedModels()), KeyPolicy.split(k.getIpAllowlist()), k.getRotatedFrom(), k.getVersion(),
+                k.getMonthlyBudgetUsd() == null ? null : CostCalculator.normalize(k.getMonthlyBudgetUsd()), monthToDate);
     }
 
     private ProviderView view(ProviderConfig p) {

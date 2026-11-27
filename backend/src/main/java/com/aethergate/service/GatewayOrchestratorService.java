@@ -26,6 +26,9 @@ import com.aethergate.service.tenant.KeyPolicy;
 import com.aethergate.service.tenant.KeyPolicyViolationException;
 import com.aethergate.service.tenant.TenantAdminService;
 import com.aethergate.service.webhook.BudgetAlertTrigger;
+import com.aethergate.service.finops.CostControlService;
+import com.aethergate.service.metering.HoldScope;
+import com.aethergate.service.metering.SpendCapExceededException;
 import java.math.BigDecimal;
 import java.security.SecureRandom;
 import java.util.List;
@@ -68,14 +71,16 @@ public class GatewayOrchestratorService {
     private final RequestLogService requestLogs;
     private final GuardrailEnforcer guardrails;
     private final BudgetAlertTrigger alerts;
+    private final CostControlService costControls;
     private final Executor cacheWriter;
     private final int defaultMaxTokens;
     private final LongSupplier clockMillis;
 
     public GatewayOrchestratorService(RateLimiterService rateLimiter, SemanticCacheService cache, TenantAdminService admin,
                                       MeteringLedgerService ledger, LlmRouterService router, RequestLogService requestLogs,
-                                      GuardrailEnforcer guardrails, BudgetAlertTrigger alerts,
+                                      GuardrailEnforcer guardrails, BudgetAlertTrigger alerts, CostControlService costControls,
                                       @Qualifier("cacheWriteExecutor") Executor cacheWriter, AetherGateProperties properties) {
+        this.costControls = costControls;
         this.guardrails = guardrails;
         this.alerts = alerts;
         this.rateLimiter = rateLimiter;
@@ -117,7 +122,7 @@ public class GatewayOrchestratorService {
         Optional<CacheHit> hit = TenantContext.callAs(tenantId, () -> cache.lookup(cacheModel, cacheKey))
                 .filter(h -> policy.allowsModel(h.modelName())); // a restricted key never gets another model's answer
         if (hit.isPresent()) {
-            return new CachedExecution(requestId, principal, usage, hit.get(), promptTokens, start, redactions, cmd.template());
+            return new CachedExecution(requestId, principal, usage, hit.get(), promptTokens, start, redactions, cmd);
         }
 
         List<RouteTarget> chain = TenantContext.callAs(tenantId, admin::routeChain);
@@ -131,17 +136,43 @@ public class GatewayOrchestratorService {
         if (chain.isEmpty()) {
             throw new AllProvidersFailedException(List.of("no enabled providers configured"));
         }
+        CostControlService.Routing routing = costControls.route(tenantId, chain, policy);
+        chain = routing.chain();
         BigDecimal hold = chain.stream()
                 .map(t -> CostCalculator.estimatedMaxCost(promptTokens, maxTokens, t.inputCostPer1m(), t.outputCostPer1m()))
                 .max(BigDecimal::compareTo)
                 .orElseThrow();
-        Reservation reservation = TenantContext.callAs(tenantId, () -> ledger.reserveBudget(requestId, hold,
-                "Pre-flight hold: " + promptTokens + " prompt + " + maxTokens + " max completion tokens",
-                principal.projectId()));
+        RequestAttribution attr = cmd.attribution();
+        HoldScope scope = new HoldScope(principal.projectId(), principal.apiKeyId(), attr.endUserId(), attr.sessionId(),
+                policy.monthlyBudgetUsd());
+        Reservation reservation;
+        try {
+            reservation = TenantContext.callAs(tenantId, () -> ledger.reserveBudget(requestId, hold,
+                    "Pre-flight hold: " + promptTokens + " prompt + " + maxTokens + " max completion tokens", scope));
+        } catch (SpendCapExceededException e) {
+            recordBlocked(tenantId, e, requestId);
+            throw e;
+        }
         CompletionCommand admitted = cmd;
         List<RouteTarget> route = chain;
         return new LiveExecution(requestId, principal, usage, admitted, route, reservation, maxTokens, cacheModel, cacheKey,
-                start, redactions);
+                start, redactions, routing.downgradedTo());
+    }
+
+    /** The block itself must not fail the response it explains: a write problem is logged, the 402/429 still goes out. */
+    private void recordBlocked(UUID tenantId, SpendCapExceededException e, String requestId) {
+        try {
+            TenantContext.runAs(tenantId, () -> costControls.recordBlocked(e, requestId));
+        } catch (RuntimeException ex) {
+            log.warn("Could not record cost-control block for {}: {}", requestId, ex.getMessage());
+        }
+    }
+
+    /** Attribution and routing columns of a request log row. */
+    static LlmRequestLog attributed(LlmRequestLog row, CompletionCommand cmd, String routingReason) {
+        RequestAttribution a = cmd.attribution();
+        String requested = cmd.model() == null || cmd.model().isBlank() ? "auto" : cmd.model();
+        return row.withAttribution(a.endUserId(), a.sessionId(), a.tags()).withRouting(requested, routingReason);
     }
 
     private static UUID templateId(CompletionCommand c) {
@@ -198,11 +229,13 @@ public class GatewayOrchestratorService {
         private final long start;
         private final int redactions;
         private final TemplateRef template;
+        private final CompletionCommand cmd;
 
         @SuppressWarnings("java:S107")
         CachedExecution(String requestId, GatewayPrincipal principal, RateLimiterService.Usage usage, CacheHit hit,
-                        int promptTokens, long start, int redactions, TemplateRef template) {
-            this.template = template;
+                        int promptTokens, long start, int redactions, CompletionCommand cmd) {
+            this.cmd = cmd;
+            this.template = cmd.template();
             this.redactions = redactions;
             this.requestId = requestId;
             this.principal = principal;
@@ -228,13 +261,14 @@ public class GatewayOrchestratorService {
             }
             int latency = (int) (clockMillis.getAsLong() - start);
             BigDecimal saved = hit.originalCostUsd() == null ? ZERO : hit.originalCostUsd();
-            TenantContext.runAs(principal.tenantId(), () -> requestLogs.record(new LlmRequestLog(principal.tenantId(),
+            TenantContext.runAs(principal.tenantId(), () -> requestLogs.record(attributed(new LlmRequestLog(principal.tenantId(),
                     requestId, principal.apiKeyId(), principal.projectId(), "CACHE", hit.modelName(), promptTokens, hit.completionTokens(),
-                    ZERO, saved, latency, timing.ttftMs(), "HIT", false, 200).withTemplate(templateId(), templateVersion())));
+                    ZERO, saved, latency, timing.ttftMs(), "HIT", false, 200).withTemplate(templateId(), templateVersion()),
+                    cmd, null)));
             log.info("cache HIT request={} similarity={} saved=${}", requestId, String.format("%.4f", hit.similarity()), saved);
             return new CompletionOutcome(requestId, "HIT", "CACHE", hit.modelName(), false, promptTokens,
                     hit.completionTokens(), ZERO, ZERO, ZERO, saved, timing.ttftMs(), latency, false, List.of(), "stop",
-                    hit.responseText(), hit.similarity(), redactions);
+                    hit.responseText(), hit.similarity(), redactions, null);
         }
     }
 
@@ -250,11 +284,13 @@ public class GatewayOrchestratorService {
         private final String cacheKey;
         private final long start;
         private final int redactions;
+        private final String downgradedTo;
 
         @SuppressWarnings("java:S107")
         LiveExecution(String requestId, GatewayPrincipal principal, RateLimiterService.Usage usage, CompletionCommand cmd,
                       List<RouteTarget> chain, Reservation reservation, int maxTokens, String cacheModel, String cacheKey,
-                      long start, int redactions) {
+                      long start, int redactions, String downgradedTo) {
+            this.downgradedTo = downgradedTo;
             this.redactions = redactions;
             this.requestId = requestId;
             this.principal = principal;
@@ -271,6 +307,11 @@ public class GatewayOrchestratorService {
         @Override public String requestId() { return requestId; }
         @Override public boolean cacheHit() { return false; }
         @Override public RateLimiterService.Usage rateLimitUsage() { return usage; }
+        @Override public String downgradedTo() { return downgradedTo; }
+
+        private String routingReason(RouteTarget used) {
+            return downgradedTo != null && used.model().equals(downgradedTo) ? CostControlService.DOWNGRADE : null;
+        }
 
         @Override
         public CompletionOutcome run(TokenSink sink) {
@@ -296,9 +337,10 @@ public class GatewayOrchestratorService {
             } catch (AllProvidersFailedException e) {
                 TenantContext.runAs(tenantId, () -> ledger.releaseReservation(requestId, "All providers unavailable"));
                 int latency = (int) (clockMillis.getAsLong() - start);
-                TenantContext.runAs(tenantId, () -> requestLogs.record(new LlmRequestLog(tenantId, requestId,
+                TenantContext.runAs(tenantId, () -> requestLogs.record(attributed(new LlmRequestLog(tenantId, requestId,
                         principal.apiKeyId(), principal.projectId(), "NONE", chain.getFirst().model(), TokenEstimator.countPrompt(cmd.messages()), 0,
-                        ZERO, ZERO, latency, latency, "MISS", true, 503).withTemplate(templateId(cmd), templateVersion(cmd))));
+                        ZERO, ZERO, latency, latency, "MISS", true, 503).withTemplate(templateId(cmd), templateVersion(cmd)),
+                        cmd, routingReason(chain.getFirst()))));
                 throw e;
             } finally {
                 MDC.remove("request_id");
@@ -314,10 +356,10 @@ public class GatewayOrchestratorService {
             Settlement settlement = TenantContext.callAs(tenantId, () -> ledger.settleTransaction(requestId, actual,
                     target.model() + ": " + result.promptTokens() + " in / " + result.completionTokens() + " out tokens"));
             int latency = (int) (clockMillis.getAsLong() - start);
-            TenantContext.runAs(tenantId, () -> requestLogs.record(new LlmRequestLog(tenantId, requestId, principal.apiKeyId(),
+            TenantContext.runAs(tenantId, () -> requestLogs.record(attributed(new LlmRequestLog(tenantId, requestId, principal.apiKeyId(),
                     principal.projectId(), target.provider().name(), target.model(), result.promptTokens(), result.completionTokens(),
                     settlement.settledUsd(), ZERO, latency, timing.ttftMs(), "MISS", failover, status)
-                    .withTemplate(templateId(cmd), templateVersion(cmd))));
+                    .withTemplate(templateId(cmd), templateVersion(cmd)), cmd, routingReason(target))));
             rateLimiter.recordCompletion(principal.limits(), result.completionTokens());
             alerts.afterSettle(tenantId, principal.projectId());
             log.info("settled request={} provider={} cost=${} released=${} failover={}", requestId, target.provider(),
@@ -325,7 +367,7 @@ public class GatewayOrchestratorService {
             return new CompletionOutcome(requestId, "MISS", target.provider().name(), target.model(), live,
                     result.promptTokens(), result.completionTokens(), settlement.reservedUsd(), settlement.settledUsd(),
                     settlement.releasedUsd(), ZERO, timing.ttftMs(), latency, failover, attempts, result.finishReason(),
-                    result.text(), null, redactions);
+                    result.text(), null, redactions, routingReason(target) == null ? null : target.model());
         }
 
         private void storeInCache(UUID tenantId, String text, BigDecimal cost, int completionTokens) {

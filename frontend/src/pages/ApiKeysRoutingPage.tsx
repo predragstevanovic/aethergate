@@ -4,7 +4,8 @@ import { Badge, Button, EmptyState, ErrorBanner, Field, Modal, PageHeader, Panel
 import { useAsyncAction, useClipboard } from '../hooks/useInteractions'
 import { useResource } from '../hooks/useResource'
 import { API_BASE, del, get, patch, post, put, putIfMatch, type ApiKeyView, type ProjectList, type ProjectView, type ProviderView, type WorkspaceSettings } from '../lib/api'
-import { dateTime, int, relative, usd, usd8 } from '../lib/format'
+import { dateTime, int, relative, usd, usd8, usdSmart } from '../lib/format'
+import { CostControlsPanel } from '../components/CostControlsPanel'
 import { useAuth } from '../context/AuthContext'
 
 interface CreatedKey {
@@ -20,6 +21,7 @@ export function ApiKeysRoutingPage() {
         description="Keys authenticate the OpenAI-compatible gateway. Only their SHA-256 hash is stored; the raw key is shown once. Routing priority decides which provider serves a request and where it fails over."
       />
       <WorkspacePanel />
+      <CostControlsPanel />
       <KeysPanel />
       <RoutingPanel />
       <QuickstartPanel />
@@ -68,6 +70,7 @@ function KeysPanel() {
                 <th className="font-normal px-3">Key</th>
                 <th className="font-normal px-3">Project</th>
                 <th className="font-normal px-3 text-right">Limits</th>
+                <th className="font-normal px-3 text-right">Spend (month)</th>
                 <th className="font-normal px-3">Created</th>
                 <th className="font-normal px-3">Status</th>
                 <th className="px-5" aria-label="Actions" />
@@ -99,6 +102,14 @@ function KeysPanel() {
                     )}
                   </td>
                   <td className="px-3 text-right font-mono num text-ink-2 whitespace-nowrap">{int(k.rate_limit_rpm)} rpm · {int(k.rate_limit_tpm)} tpm</td>
+                  <td className="px-3 text-right font-mono num whitespace-nowrap">
+                    {usdSmart(k.month_to_date_usd ?? '0')}
+                    {k.monthly_budget_usd && (
+                      <span className={`block text-[11px] ${Number(k.month_to_date_usd ?? 0) >= Number(k.monthly_budget_usd) ? 'text-bad' : 'text-ink-3'}`}>
+                        cap {usdSmart(k.monthly_budget_usd)}
+                      </span>
+                    )}
+                  </td>
                   <td className="px-3 text-ink-3 whitespace-nowrap" title={dateTime(k.created_at)}>{relative(k.created_at)}</td>
                   <td className="px-3">
                     {k.status === 'ACTIVE' ? <Badge tone="good" dot>Active</Badge> : k.status === 'EXPIRED' ? <Badge tone="warn">Expired</Badge> : <Badge>Revoked</Badge>}
@@ -163,12 +174,14 @@ function KeyPolicyModal({ apiKey, onClose, onSaved }: { apiKey: ApiKeyView | nul
   const [expires, setExpires] = useState('')
   const [models, setModels] = useState<string[]>([])
   const [ips, setIps] = useState('')
+  const [budget, setBudget] = useState('')
   const save = useAsyncAction(async () => {
     await putIfMatch(`/api/v1/tenant/api-keys/${apiKey!.id}/policy`, apiKey!.version, {
       name: name.trim(), rate_limit_rpm: Number(rpm), rate_limit_tpm: Number(tpm),
       expires_at: expires ? new Date(expires).toISOString() : null,
       allowed_models: models,
       ip_allowlist: ips.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean),
+      monthly_budget_usd: budget.trim() ? budget.trim() : null,
     })
     onSaved()
   })
@@ -180,6 +193,7 @@ function KeyPolicyModal({ apiKey, onClose, onSaved }: { apiKey: ApiKeyView | nul
     setExpires(apiKey.expires_at ? toLocalInput(apiKey.expires_at) : '')
     setModels(apiKey.allowed_models)
     setIps(apiKey.ip_allowlist.join(', '))
+    setBudget(apiKey.monthly_budget_usd ? String(Number(apiKey.monthly_budget_usd)) : '')
     save.clearError()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiKey])
@@ -192,6 +206,10 @@ function KeyPolicyModal({ apiKey, onClose, onSaved }: { apiKey: ApiKeyView | nul
           <Field label="Requests / min" htmlFor="pol-rpm"><input id="pol-rpm" inputMode="numeric" className={`${inputClass} font-mono num`} value={rpm} onChange={(e) => setRpm(e.target.value.replace(/\D/g, ''))} /></Field>
           <Field label="Tokens / min" htmlFor="pol-tpm"><input id="pol-tpm" inputMode="numeric" className={`${inputClass} font-mono num`} value={tpm} onChange={(e) => setTpm(e.target.value.replace(/\D/g, ''))} /></Field>
         </div>
+        <Field label="Monthly budget (USD)" htmlFor="pol-budget" hint="This key alone; checked under the same lock as the workspace limit. Empty = no key cap. Over it: 402 key-budget-exceeded.">
+          <input id="pol-budget" inputMode="decimal" className={`${inputClass} font-mono num`} value={budget} placeholder="e.g. 25.00"
+            onChange={(e) => setBudget(e.target.value.replace(/[^\d.]/g, ''))} />
+        </Field>
         <Field label="Expires (your local time)" htmlFor="pol-exp" hint="Empty = never. After this moment the key answers 401 'expired'.">
           <input id="pol-exp" type="datetime-local" className={inputClass} value={expires} onChange={(e) => setExpires(e.target.value)} />
         </Field>

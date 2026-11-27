@@ -342,6 +342,8 @@ export interface ApiKeyView {
   ip_allowlist: string[]
   rotated_from: string | null
   version: number
+  monthly_budget_usd: Money | null
+  month_to_date_usd: Money | null
 }
 
 export type ProjectStatus = 'ACTIVE' | 'ARCHIVED'
@@ -422,6 +424,7 @@ export interface Telemetry {
   finish_reason: string
   cache_similarity: number | null
   redactions: number
+  downgraded_to: string | null
 }
 
 export type GuardrailType = 'KEYWORDS' | 'REGEX' | 'PII_EMAIL' | 'PII_CARD'
@@ -467,6 +470,276 @@ export interface WorkspaceSettings {
   created_at: string
 }
 
+// ── FinOps (V8): attribution, sessions, forecast, anomalies, advisor, cost controls ──────
+
+export type Range = '24h' | '7d' | '30d' | '90d'
+
+export interface AttributionRow {
+  key: string
+  label: string
+  requests: number
+  prompt_tokens: number
+  completion_tokens: number
+  cost_usd: Money
+  saved_usd: Money
+  share: number
+  cache_hit_ratio: number
+  avg_latency_ms: number | null
+  errors: number
+}
+
+export interface Attribution {
+  dimension: string
+  range: string
+  rows: AttributionRow[]
+  total_cost_usd: Money
+  total_requests: number
+  tag_keys: string[]
+  allocated_pct: number
+  unallocated_usd: Money
+}
+
+export interface EndUserRow {
+  end_user_id: string
+  requests: number
+  tokens: number
+  cost_usd: Money
+  today_usd: Money
+  sessions: number
+  last_seen_at: string
+  cap_used_pct: number | null
+  blocked_today: number
+}
+
+export interface EndUsers {
+  range: string
+  users: EndUserRow[]
+  daily_cap_usd: Money | null
+  anonymous_requests: number
+  anonymous_cost_usd: Money
+}
+
+export interface SessionRow {
+  session_id: string
+  end_user_id: string | null
+  started_at: string
+  last_at: string
+  duration_ms: number
+  steps: number
+  prompt_tokens: number
+  completion_tokens: number
+  cost_usd: Money
+  errors: number
+  cache_hits: number
+  models: string[]
+  blocked: number
+  budget_used_pct: number | null
+  steps_used_pct: number | null
+}
+
+export interface Sessions {
+  range: string
+  sessions: SessionRow[]
+  session_cap_usd: Money | null
+  session_max_requests: number | null
+  total_sessions: number
+  total_cost_usd: Money
+}
+
+export interface SessionStep {
+  step: number
+  request_id: string
+  at: string
+  offset_ms: number
+  provider: string
+  model: string
+  prompt_tokens: number
+  completion_tokens: number
+  cost_usd: Money
+  cumulative_usd: Money
+  latency_ms: number
+  cache_status: 'HIT' | 'MISS'
+  status_code: number
+  failover: boolean
+  routing_reason: string | null
+  tags: Record<string, string>
+}
+
+export interface ControlEvent {
+  kind: 'KEY_MONTHLY_BUDGET' | 'END_USER_DAILY_CAP' | 'SESSION_BUDGET' | 'SESSION_STEPS'
+  scope_key: string
+  period: string
+  limit_value: Money
+  observed_value: Money
+  blocked_count: number
+  last_request_id: string | null
+  first_at: string
+  last_at: string
+}
+
+export interface SessionDetail {
+  summary: SessionRow
+  steps: SessionStep[]
+  blocks: ControlEvent[]
+}
+
+export interface ExplorerRow {
+  request_id: string
+  created_at: string
+  provider: string
+  model: string
+  requested_model: string | null
+  routing_reason: string | null
+  project_name: string | null
+  api_key_prefix: string
+  end_user_id: string | null
+  session_id: string | null
+  tags: Record<string, string>
+  prompt_tokens: number
+  completion_tokens: number
+  cost_usd: Money
+  saved_usd: Money
+  latency_ms: number
+  ttft_ms: number
+  cache_status: 'HIT' | 'MISS'
+  failover: boolean
+  status_code: number
+  template_version: number | null
+}
+
+export interface RequestPage {
+  rows: ExplorerRow[]
+  page: number
+  size: number
+  total: number
+  cost_usd: Money
+  tokens: number
+  filters: Record<string, string>
+}
+
+export interface ForecastPoint {
+  day: string
+  actual_usd: Money | null
+  cumulative_usd: Money | null
+  projected_usd: Money | null
+  low_usd: Money | null
+  high_usd: Money | null
+}
+
+export interface ProjectForecast {
+  project_id: string
+  name: string
+  month_to_date_usd: Money
+  daily_run_rate_usd: Money
+  projected_usd: Money
+  budget_usd: Money | null
+  projected_pct: number | null
+  status: 'ON_TRACK' | 'AT_RISK' | 'OVER_BUDGET' | 'NO_BUDGET'
+}
+
+export interface Forecast {
+  period: string
+  days_in_month: number
+  elapsed_days: number
+  month_to_date_usd: Money
+  daily_run_rate_usd: Money
+  linear_projection_usd: Money
+  projected_month_end_usd: Money
+  projected_low_usd: Money
+  projected_high_usd: Money
+  hard_limit_usd: Money
+  projected_pct_of_limit: number
+  limit_reached_on: string | null
+  available_balance_usd: Money
+  balance_runway_days: number | null
+  balance_exhausted_on: string | null
+  status: 'ON_TRACK' | 'AT_RISK' | 'OVER_LIMIT'
+  trend_pct: number
+  points: ForecastPoint[]
+  projects: ProjectForecast[]
+}
+
+export interface HourPoint {
+  hour: string
+  cost_usd: Money
+  baseline_usd: Money
+  threshold_usd: Money
+  anomalous: boolean
+}
+
+export interface AnomalyView {
+  bucket_start: string
+  observed_usd: Money
+  baseline_usd: Money
+  threshold_usd: Money
+  z_score: number
+  severity: 'WARNING' | 'CRITICAL'
+  top_dimension: string | null
+  detected_at: string
+}
+
+export interface Anomalies {
+  hours: HourPoint[]
+  anomalies: AnomalyView[]
+  z_threshold: number
+  method: string
+}
+
+export interface Recommendation {
+  id: string
+  kind: string
+  category: 'COST' | 'RELIABILITY' | 'GOVERNANCE' | 'SECURITY'
+  severity: 'HIGH' | 'MEDIUM' | 'LOW'
+  title: string
+  detail: string
+  monthly_savings_usd: Money | null
+  action: { label: string; href: string } | null
+}
+
+export interface Recommendations {
+  items: Recommendation[]
+  total_monthly_savings_usd: Money
+  last30d_spend_usd: Money
+  generated_at: string
+}
+
+export interface CostControls {
+  end_user_daily_cap_usd: Money | null
+  session_cap_usd: Money | null
+  session_max_requests: number | null
+  downgrade_at_pct: number | null
+  downgrade_model: string | null
+  downgrade_active: boolean
+  month_to_date_usd: Money
+  hard_budget_limit_usd: Money
+  used_pct: number
+  downgrade_candidates: string[]
+  demo: boolean
+}
+
+/** Authenticated file download (the browser cannot add the Bearer header to a plain link). */
+export async function download(path: string, fallbackName: string): Promise<{ rows: string | null; billed: string | null }> {
+  let res: Response
+  try {
+    res = await fetch(`${API_BASE}${path}`, { headers: await authHeader() })
+  } catch {
+    throw new ApiError(0, { title: 'Gateway unreachable', detail: `Cannot reach the AetherGate API at ${API_BASE}.` })
+  }
+  if (!res.ok) throw await toError(res)
+  const blob = await res.blob()
+  const disposition = res.headers.get('Content-Disposition') ?? ''
+  const name = /filename="?([^";]+)"?/.exec(disposition)?.[1] ?? fallbackName
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+  return { rows: res.headers.get('X-AetherGate-Rows'), billed: res.headers.get('X-AetherGate-Billed-Cost') }
+}
+
 // ── Streaming (SSE over fetch: EventSource cannot POST or send headers) ────────────────
 
 export interface StreamHandlers {
@@ -483,7 +756,7 @@ export interface TemplateInvocation {
 
 export async function streamPlayground(
   body: { prompt?: string; system?: string; max_tokens?: number; simulate_failure?: boolean; project_id?: string | null;
-    template?: TemplateInvocation | null },
+    template?: TemplateInvocation | null; end_user?: string | null; session_id?: string | null; tags?: string | null },
   handlers: StreamHandlers,
   signal?: AbortSignal,
 ): Promise<void> {

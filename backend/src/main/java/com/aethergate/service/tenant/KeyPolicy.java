@@ -11,9 +11,14 @@ import java.util.stream.Collectors;
  * Restrictions carried by an API key: expiry, the models it may use, the networks it may call from.
  * Empty sets mean "no restriction". Evaluated on every request (the principal itself is cached for 30 s).
  */
-public record KeyPolicy(Instant expiresAt, Set<String> allowedModels, List<Cidr> ipAllowlist) {
+public record KeyPolicy(Instant expiresAt, Set<String> allowedModels, List<Cidr> ipAllowlist,
+                        java.math.BigDecimal monthlyBudgetUsd) {
 
-    public static final KeyPolicy NONE = new KeyPolicy(null, Set.of(), List.of());
+    public static final KeyPolicy NONE = new KeyPolicy(null, Set.of(), List.of(), null);
+
+    public KeyPolicy(Instant expiresAt, Set<String> allowedModels, List<Cidr> ipAllowlist) {
+        this(expiresAt, allowedModels, ipAllowlist, null);
+    }
 
     public KeyPolicy {
         allowedModels = Set.copyOf(allowedModels);
@@ -22,9 +27,15 @@ public record KeyPolicy(Instant expiresAt, Set<String> allowedModels, List<Cidr>
 
     /** From the comma-separated columns of {@code api_keys}. */
     public static KeyPolicy of(Instant expiresAt, String allowedModelsCsv, String ipAllowlistCsv) {
+        return of(expiresAt, allowedModelsCsv, ipAllowlistCsv, null);
+    }
+
+    /** {@code monthlyBudgetUsd}: the key's own monthly spend cap, enforced under the tenant lock (null = none). */
+    public static KeyPolicy of(Instant expiresAt, String allowedModelsCsv, String ipAllowlistCsv,
+                               java.math.BigDecimal monthlyBudgetUsd) {
         return new KeyPolicy(expiresAt,
                 split(allowedModelsCsv).stream().map(m -> m.toLowerCase(Locale.ROOT)).collect(Collectors.toSet()),
-                split(ipAllowlistCsv).stream().map(Cidr::parse).toList());
+                split(ipAllowlistCsv).stream().map(Cidr::parse).toList(), monthlyBudgetUsd);
     }
 
     public static List<String> split(String csv) {

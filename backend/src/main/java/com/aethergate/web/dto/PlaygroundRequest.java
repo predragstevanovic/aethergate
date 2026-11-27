@@ -13,4 +13,13 @@ public record PlaygroundRequest(
         @Min(1) @Max(2048) Integer maxTokens,
         boolean simulateFailure,
         UUID projectId,
-        @Valid TemplateInvocation template) {}
+        @Valid TemplateInvocation template,
+        @Size(max = 128) String endUser,
+        @Size(max = 128) String sessionId,
+        @Size(max = 600) String tags) {
+
+    public PlaygroundRequest(String prompt, String system, Integer maxTokens, boolean simulateFailure, UUID projectId,
+                             TemplateInvocation template) {
+        this(prompt, system, maxTokens, simulateFailure, projectId, template, null, null, null);
+    }
+}

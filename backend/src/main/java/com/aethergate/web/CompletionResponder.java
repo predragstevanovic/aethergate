@@ -85,6 +85,9 @@ public class CompletionResponder {
         HttpHeaders h = new HttpHeaders();
         h.add("X-Request-Id", exec.requestId());
         h.add("X-Cache", exec.cacheHit() ? "HIT" : "MISS");
+        if (exec.downgradedTo() != null) {
+            h.add("X-AetherGate-Downgraded-To", exec.downgradedTo()); // soft budget limit routed to a cheaper model
+        }
         h.add("X-RateLimit-Limit-Requests", String.valueOf(exec.rateLimitUsage().rpmLimit()));
         h.add("X-RateLimit-Remaining-Requests", String.valueOf(exec.rateLimitUsage().rpmRemaining()));
         h.add("X-RateLimit-Limit-Tokens", String.valueOf(exec.rateLimitUsage().tpmLimit()));

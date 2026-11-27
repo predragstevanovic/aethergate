@@ -328,6 +328,46 @@ flowchart LR
 | Attribution | `llm_request_logs.template_id/template_version` (composite tenant-safe FK) → per-version requests, average cost, tokens, latency and cache-hit rate. A template that served traffic cannot be deleted (409). |
 | API | Playground `template` field; gateway extension `"prompt_template": {"id": "<id or name>", "version"?, "variables": {…}}` on `/v1/chat/completions`. |
 
+### 4.10. Request attribution: end users, agent sessions, cost tags (V8)
+
+| Concern | Design |
+|---|---|
+| Ingestion | `X-AetherGate-User`, `X-AetherGate-Session`, `X-AetherGate-Tags: k=v,k2=v2` headers win over the OpenAI body fields `user` and `metadata` (`metadata.session_id` = session, every other key = tag). Validated before anything is reserved (ids `[A-Za-z0-9._:@/+=-]{1,128}`, ≤ 10 tags, lower-case keys) → `400` otherwise. The playground has the same three fields. |
+| Storage | `llm_request_logs.end_user_id / session_id / tags JSONB (GIN jsonb_path_ops) / requested_model / routing_reason`, and **the same dimensions on every ledger line** (`api_key_id`, `end_user_id`, `session_id`) — caps are enforced from the ledger, never from telemetry. Audit check 12 proves logs and ledger agree. |
+| Showback | `/analytics/attribution?dimension=project\|model\|provider\|api_key\|end_user\|tag:<key>`: spend, tokens, share, cache-hit ratio, latency, errors per group; **tag coverage** (share of spend carrying any tag) as a FinOps KPI. Group expressions are whitelisted; tag keys are bound parameters. |
+| Explorer | `/analytics/requests` with filters `model, provider, project, api_key, end_user, session, tag=k:v (jsonb @>), cache, status, routing, q` + paging; unknown filters are `400`. `/analytics/sessions` (+ `/{id}` timeline with cumulative cost per step). |
+
+### 4.11. Fine-grained spend caps and the runaway-agent guard
+
+```mermaid
+flowchart LR
+    R["reserveBudget<br/>(tenant row FOR UPDATE)"] --> B{balance}
+    B --> L{workspace<br/>hard limit}
+    L --> P{project<br/>budget}
+    P --> K{API key<br/>monthly budget}
+    K --> U{end user<br/>daily cap}
+    U --> S{session<br/>steps + budget}
+    S --> H["RESERVE line<br/>(key, user, session)"]
+    K -. 402 .-> X["cost_control_events<br/>upsert, first = webhook"]
+    U -. 402 .-> X
+    S -. 429 / 402 .-> X
+```
+
+Every cap is "settled this period + holds still in flight + this hold ≤ cap", evaluated **under the same tenant row lock** as the balance, so N concurrent requests can never overshoot any level. Key budgets are per calendar month (`api_keys.monthly_budget_usd`, carried in the cached principal and evicted on change), end-user caps per UTC day, session caps for the session's lifetime; the step limit counts the session's `RESERVE` lines (a looping agent gets `429 session-step-limit`). A refused request writes one row per *(cap, scope, period)* in `cost_control_events` with `blocked_count + 1` (in its own transaction, after the reserve rolled back); the insert that **creates** the row (`RETURNING xmax = 0`) publishes `spend_cap.reached` exactly once.
+
+### 4.12. Budget-aware model downgrade (soft limit)
+
+`tenants.downgrade_at_pct` + `downgrade_model` (both or neither, DB check). When month-to-date settled spend reaches the threshold of the hard limit, the routing chain is reordered so the cheaper model answers first and the rest stay behind it as fallback (availability over savings). A key whose allow-list excludes that model keeps its normal chain. The decision is cached 5 s per tenant (a soft limit tolerates seconds of staleness; it saves a query per request) and invalidated on change. Responses carry `X-AetherGate-Downgraded-To`, telemetry `downgraded_to`, the log row `routing_reason = DOWNGRADE`.
+
+### 4.13. Forecast, anomaly detection, savings advisor, FOCUS export
+
+| Feature | Design |
+|---|---|
+| Forecast | From the ledger: MTD + trailing-7-day daily run rate × remaining days; 80 % band = ±1.28 σ(last 14 daily totals) × √remaining; also the naive linear projection, the date the hard limit is reached, credit runway, week-over-week trend and a per-project outlook (ON_TRACK / AT_RISK ≥ 90 % / OVER_BUDGET / NO_BUDGET). |
+| Anomalies | Hourly spend judged against the previous 168 h with a **robust z-score**: `(x − median) / (1.4826 · MAD)`, σ floored at max(10 % of median, $0.0005); anomalous when z ≥ 4, x ≥ 2 × median and x ≥ $0.01; CRITICAL at z ≥ 8. Median/MAD cannot be inflated by the spike itself. Scanned after settlements (≤ 1× per tenant per minute, off the response path) and by the seeder; `cost_anomalies UNIQUE (tenant_id, bucket_start)` makes the `cost.anomaly_detected` webhook exactly-once, with the top contributor (model · session / user · share). |
+| Savings advisor | Ranked recommendations with evidence and, where computable from real token counts × catalog prices, a monthly $ figure: model right-sizing (avg completion ≤ 500 tokens, cheapest enabled model ≥ 30 % cheaper), prompt bloat (input ≥ 6× output → 30 % trim), cache opportunity (< 15 % hit ratio), unreliable primary (≥ 5 % failovers), idle keys (14 d), heavy keys without a cap (≥ 20 % of spend), projects without budget, no budget alerts, and "enable the soft limit" when the forecast reaches ≥ 90 % of the limit. |
+| FOCUS export | `GET /analytics/export/focus?month=YYYY-MM` → FinOps Foundation **FOCUS 1.2** column names (BilledCost, EffectiveCost, ListCost = billed + cache savings, ConsumedQuantity/Unit = tokens, PricingUnit = 1M Tokens, ServiceCategory "AI and Machine Learning", SubAccount = project, Tags JSON, `x_` columns for tokens, requests, cache hits/savings). One row per UTC day × project × provider × model × key × tag set; BilledCost sums exactly to the ledger's settled spend (tested). RFC 4180 quoting and formula-injection-safe cells. |
+
 ---
 
 ## 5. Architecture Decision Records (ADRs)
@@ -408,6 +448,26 @@ flowchart LR
 - **Decision:** Versions are append-only rows; publishing is a pointer move with optimistic concurrency; requests record the version used.
 - **Rationale:** Rollback becomes instant and safe, and cost/latency can be compared per version because history is never rewritten.
 
+### ADR-020: Attribution dimensions on the ledger, not only on the request log
+- **Decision:** `api_key_id`, `end_user_id`, `session_id` are written on RESERVE/SETTLE/RELEASE (copied from the RESERVE on clearing).
+- **Rationale:** Caps must be checked under the tenant lock against money that is certain; the request log is written after streaming and can lag or be missing on a crash. An audit check keeps both in agreement.
+
+### ADR-021: All spend caps under the one tenant row lock
+- **Decision:** Key, end-user and session caps reuse the existing `SELECT … FOR UPDATE` on the tenant row instead of per-scope locks or counters.
+- **Rationale:** One lock order means no deadlocks and no overshoot at any level; the extra indexed sums cost microseconds next to an LLM call. Per-key/user counters in Caffeine would drift across instances.
+
+### ADR-022: Exactly-once notifications decided by unique constraints
+- **Decision:** `cost_control_events (tenant, kind, scope, period)` upsert with `RETURNING xmax = 0`, and `cost_anomalies (tenant, hour)` with `ON CONFLICT DO NOTHING`; only the creating statement enqueues the webhook (same transaction, outbox).
+- **Rationale:** Same principle as alert firings (ADR-017): the database, not timing in the application, decides who announces an event.
+
+### ADR-023: Robust statistics for anomaly detection
+- **Decision:** Median + MAD over a 168-hour trailing window with absolute floors, instead of mean + standard deviation or an ML model.
+- **Rationale:** A spike inflates the mean and σ it is compared with; median/MAD do not. Explainable in one sentence, no training data, cheap enough to run after settlements.
+
+### ADR-024: Soft limit reorders the chain instead of hard-switching the model
+- **Decision:** Past the threshold the cheap model is moved to the front; other models remain as fallback; the hold still covers the whole chain.
+- **Rationale:** A cost control must not turn into an outage when the cheap provider is down, and the ledger's worst-case hold guarantee (ADR-007) stays intact.
+
 ---
 
 ## 6. As built
@@ -415,17 +475,17 @@ flowchart LR
 | Area | Implementation |
 |---|---|
 | Gateway | `POST /v1/chat/completions` (OpenAI-compatible, SSE or JSON), `GET /v1/models`; auth by `X-API-Key` or `Authorization: Bearer ag_live_…` |
-| Console API | `/api/v1/me`, `/dashboard/overview?range=24h\|7d\|30d`, `/dashboard/ledger`, `/tenant/api-keys` (+ `PATCH` to move a key between projects), `/tenant/projects` (list, create, get, `PUT` with If-Match, `/archive`, `/restore`, `DELETE`), `/tenant/guardrails` (CRUD + `PATCH` toggle + `/test` dry run), `/tenant/settings` (GET/PUT), `/tenant/providers` (add, reprice, delete, reorder, toggle), `/tenant/api-keys/{id}/policy` (PUT If-Match), `/tenant/api-keys/{id}/rotate`, `/workspaces`, `/invitations/accept`, `/tenant/members` (invite, resend, PATCH role If-Match, DELETE), `/tenant/audit`, `/tenant/webhooks` (CRUD, rotate-secret, test, deliveries, redeliver), `/tenant/alerts`, `/tenant/prompts` (CRUD, versions, active-version If-Match, render), `/tenant/top-up`, `/playground/completions` (optional `project_id`), `/auth/demo-session` |
-| Errors | RFC 7807 `application/problem+json` with stable `type` URIs (`insufficient-quota` 402, `budget-limit-exceeded` 402, `rate-limited` 429 + `Retry-After`, `providers-unavailable` 503, `upstream-interrupted` 502, `project-budget-exceeded` 402, `project-archived` 409, `conflict` 409, `stale-version` 412, `precondition-required` 428, `guardrail-blocked` 422, `demo-read-only` 403, `insufficient-role` 403, `workspace-access-denied` 403, `ip-not-allowed` 403, `model-not-allowed` 403, `invitation-invalid` 410, `invitation-email-mismatch` 403) |
-| Database | Schema `aethergate` (shares a Supabase project safely, not exposed via PostgREST), Flyway V1–V7 (V4 third tenant + named logins, V5 projects with composite tenant-safe FKs, V6 guardrails + model catalog, V7 members + audit, webhooks outbox + alerts, key policies, prompt templates), HNSW index, append-only trigger, RLS USING + WITH CHECK on all tenant tables |
+| Console API | `/api/v1/me`, `/dashboard/overview?range=24h\|7d\|30d`, `/dashboard/ledger`, `/tenant/api-keys` (+ `PATCH` to move a key between projects), `/tenant/projects` (list, create, get, `PUT` with If-Match, `/archive`, `/restore`, `DELETE`), `/tenant/guardrails` (CRUD + `PATCH` toggle + `/test` dry run), `/tenant/settings` (GET/PUT), `/tenant/providers` (add, reprice, delete, reorder, toggle), `/tenant/api-keys/{id}/policy` (PUT If-Match), `/tenant/api-keys/{id}/rotate`, `/workspaces`, `/invitations/accept`, `/tenant/members` (invite, resend, PATCH role If-Match, DELETE), `/tenant/audit`, `/tenant/webhooks` (CRUD, rotate-secret, test, deliveries, redeliver), `/tenant/alerts`, `/tenant/prompts` (CRUD, versions, active-version If-Match, render), `/tenant/top-up`, `/playground/completions` (optional `project_id`, `end_user`, `session_id`, `tags`), `/auth/demo-session`, `/tenant/cost-controls` (GET, PUT Admin), `/analytics/attribution`, `/analytics/end-users`, `/analytics/sessions` (+ `/{id}`), `/analytics/requests`, `/analytics/forecast`, `/analytics/anomalies`, `/analytics/recommendations`, `/analytics/export/focus` |
+| Errors | RFC 7807 `application/problem+json` with stable `type` URIs (`insufficient-quota` 402, `budget-limit-exceeded` 402, `rate-limited` 429 + `Retry-After`, `providers-unavailable` 503, `upstream-interrupted` 502, `project-budget-exceeded` 402, `project-archived` 409, `conflict` 409, `stale-version` 412, `precondition-required` 428, `guardrail-blocked` 422, `demo-read-only` 403, `insufficient-role` 403, `workspace-access-denied` 403, `ip-not-allowed` 403, `model-not-allowed` 403, `invitation-invalid` 410, `invitation-email-mismatch` 403, `key-budget-exceeded` 402, `end-user-cap-exceeded` 402, `session-budget-exceeded` 402, `session-step-limit` 429) |
+| Database | Schema `aethergate` (shares a Supabase project safely, not exposed via PostgREST), Flyway V1–V8 (V4 third tenant + named logins, V5 projects with composite tenant-safe FKs, V6 guardrails + model catalog, V7 members + audit, webhooks outbox + alerts, key policies, prompt templates, V8 attribution columns on logs and ledger, key/end-user/session caps, soft-limit downgrade, cost-control events, cost anomalies), HNSW index, append-only trigger, RLS USING + WITH CHECK on all tenant tables |
 | Demo login | Server-side Supabase password grant; self-healing (resets the demo user via the GoTrue admin API if someone changed its password) |
 
 ## 7. Quality gates
 
 | Gate | Result |
 |---|---|
-| JUnit 5 + AssertJ + Mockito | 141 tests (unit, Testcontainers `pgvector/pgvector:pg17` integration, MockMvc API, ArchUnit) |
-| JaCoCo (enforced in `mvn verify`) | ≥ 85 % lines **and** branches — currently ~96 % lines / ~86 % branches |
+| JUnit 5 + AssertJ + Mockito | 163 tests (unit, Testcontainers `pgvector/pgvector:pg17` integration, MockMvc API, ArchUnit) |
+| JaCoCo (enforced in `mvn verify`) | ≥ 85 % lines **and** branches — currently ~96 % lines / ~86 % branches (after V8: 96.3 % / 86.4 %) |
 | Concurrency | 20 simultaneous $0.10 holds on a $1.00 balance → exactly 10 succeed, balance never negative; the same against a $1.00 **project** budget |
 | ArchUnit | controllers never touch repositories, no JPA entities in web layer, DTOs are records, no `synchronized` (virtual-thread pinning), no secret constants |
-| Live audit (`--aethergate.tool=audit`) | 15 invariant checks against the production database (funds equation, hold conservation, per-request split, one project per request, project spend ≤ budget, no holds after archive, RLS visibility incl. projects, guardrails, members, webhooks, alerts and prompts, templated requests point at an existing version, alerts fired at most once per month, trigger, vector shape, key hashing) |
+| Live audit (`--aethergate.tool=audit`) | 17 invariant checks (V8 adds: ledger lines carry the request's key / end user / session; anomalies at most once per tenant and hour) against the production database (funds equation, hold conservation, per-request split, one project per request, project spend ≤ budget, no holds after archive, RLS visibility incl. projects, guardrails, members, webhooks, alerts and prompts, templated requests point at an existing version, alerts fired at most once per month, trigger, vector shape, key hashing) |

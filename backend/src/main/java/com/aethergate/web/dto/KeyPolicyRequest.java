@@ -14,4 +14,6 @@ public record KeyPolicyRequest(@NotBlank @Size(max = 100) String name,
                                @NotNull @Min(100) @Max(10_000_000) Integer rateLimitTpm,
                                Instant expiresAt,
                                @Size(max = 10) List<String> allowedModels,
-                               @Size(max = 10) List<String> ipAllowlist) {}
+                               @Size(max = 10) List<String> ipAllowlist,
+                               @jakarta.validation.constraints.DecimalMin("0.0001") @jakarta.validation.constraints.DecimalMax("1000000")
+                               java.math.BigDecimal monthlyBudgetUsd) {}
